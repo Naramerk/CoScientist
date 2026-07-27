@@ -20,12 +20,15 @@ from CoScientist.agents.callbacks.research_callbacks import (
 from CoScientist.agents.callbacks.tool_callbacks import (
     after_fullset_reranker_agent,
     after_tool_reranker_agent,
+    after_tool_reranker_model,
     before_get_task,
     before_tool_reranker_model,
+    force_final_when_fedot_deliverable,
     inject_graph_root,
     make_unknown_tool_guard,
     print_research_agent_tool_call,
     redirect_when_no_tools,
+    refuse_when_fedot_deliverable,
 )
 
 __all__ = [
@@ -38,9 +41,12 @@ __all__ = [
     "cleanup_uploaded_papers",
     "before_tool_reranker_model",
     "after_tool_reranker_agent",
+    "after_tool_reranker_model",
     "after_fullset_reranker_agent",
     "print_research_agent_tool_call",
     "redirect_when_no_tools",
+    "refuse_when_fedot_deliverable",
+    "force_final_when_fedot_deliverable",
     "make_unknown_tool_guard",
     "before_get_task",
     "inject_graph_root",

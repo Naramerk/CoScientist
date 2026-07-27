@@ -25,6 +25,7 @@ from google.genai import types
 from CoScientist.config import get_settings
 from CoScientist.agents import orchestrator_agent, root_agent
 from CoScientist.agents.callbacks import cleanup_uploaded_papers
+from CoScientist.tools.fedot_artifact_handoff import fetch_artifact_table
 from CoScientist.hitl.tool import hitl_toolset
 from CoScientist.hitl import (
     AbstractHITLHandler,
@@ -91,34 +92,96 @@ def reset_session_state(
         pass
 
 
-def _s3_csv_preview(url: str, max_rows: int = 10, max_bytes: int = 200_000) -> str:
-    """Best-effort: download a presigned-S3 CSV and return a small text preview
-    (header + first rows of Smiles + key property columns). Returns '' on any failure.
+def _render_table_preview(table: dict) -> str:
+    """Render a parsed artifact table (``{columns, rows}``) as a compact text preview.
 
-    Lets the final answer be formed from the ACTUAL S3 file contents rather than a bare
-    link or unverified prose (F010.A6).
+    Column-agnostic: shows whatever headers the artifact actually has (rows are
+    already bounded by the handoff parser), so the answer is built from the ACTUAL
+    file contents — not a bare link or unverified prose — with no baked-in column
+    list (F010.A6).
     """
-    import urllib.request
-    import csv
-    import io
-    try:
-        with urllib.request.urlopen(url, timeout=20) as resp:
-            raw = resp.read(max_bytes).decode("utf-8", "replace")
-        rows = list(csv.reader(io.StringIO(raw)))
-        if not rows:
-            return ""
-        hdr = rows[0]
-        prefer = ("Smiles", "QED", "LogP", "Synthetic Accessibility", "Validity")
-        keep = [i for i, h in enumerate(hdr) if h in prefer] or list(range(min(5, len(hdr))))
-        out = [" | ".join(hdr[i] for i in keep)]
-        for row in rows[1:1 + max_rows]:
-            out.append(" | ".join(row[i] if i < len(row) else "" for i in keep))
-        extra = len(rows) - 1 - max_rows
-        if extra > 0:
-            out.append(f"… (+{extra} more rows)")
-        return "\n".join(out)
-    except Exception:
+    columns = [str(c) for c in (table.get("columns") or [])]
+    rows = table.get("rows") or []
+    if not columns or not rows:
         return ""
+    lines = [" | ".join(columns)]
+    for row in rows:
+        lines.append(" | ".join(str(row.get(c, "")) for c in columns))
+    return "\n".join(lines)
+
+
+async def finalize_response_with_artifacts(
+    *,
+    session_service,
+    app_name: str,
+    user_id: str,
+    session_id: str,
+    final_response: str,
+    run_error: Optional[Exception] = None,
+) -> str:
+    """Append any captured S3 FEDOT artifacts not already reflected in the answer.
+
+    Deterministic finalizer (F010.A5/A6): the orchestrator LLM sometimes drops a
+    successfully-generated result. The real molecules live behind a presigned S3
+    URL that fedot_tool captured into state['fedot_artifacts']. Kept as a
+    standalone function (rather than inlined into ``CoScientistManager.run``) so
+    it stays unit-testable without spinning up the full agent stack; currently
+    only the CLI calls it, but the same partial-delivery guarantee is available
+    to any other entry point (e.g. a web socket handler) that adopts it later.
+    """
+    try:
+        session = await session_service.get_session(
+            app_name=app_name, user_id=user_id, session_id=session_id,
+        )
+        state = (getattr(session, "state", None) or {}) if session else {}
+    except Exception:
+        state = {}
+
+    # Prefer tables already parsed by fedot_tool; fall back to a one-off fetch.
+    by_url = {
+        t.get("url"): t
+        for t in (state.get("fedot_artifact_tables") or [])
+        if isinstance(t, dict) and t.get("url")
+    }
+
+    blocks = []
+    for artifact in state.get("fedot_artifacts") or []:
+        url = artifact.get("url")
+        if not url:
+            continue
+        table = by_url.get(url) or await asyncio.to_thread(fetch_artifact_table, url)
+        preview = _render_table_preview(table) if table else ""
+        url_present = url in (final_response or "")
+        preview_present = bool(preview) and preview in (final_response or "")
+        # Nothing new to add: the link is already shown and either the rows are
+        # too, or there are none to show.
+        if url_present and (preview_present or not preview):
+            continue
+        count = artifact.get("generated_count")
+        tag = f" ({count} molecules)" if count else ""
+        head = (
+            f"**Generated molecules{tag}**"
+            if url_present
+            else f"**Generated molecules{tag}** — [download full results]({url})"
+        )
+        parts = [head] + ([f"```\n{preview}\n```"] if preview and not preview_present else [])
+        blocks.append("\n".join(parts))
+
+    if blocks:
+        final_response = (final_response or "").rstrip() + "\n\n---\n" + "\n\n".join(blocks)
+
+    if not (final_response or "").strip():
+        if run_error is not None:
+            return (
+                f"The run stopped early ({type(run_error).__name__}) before producing a result, "
+                "and no partial artifacts were captured. This is usually a slow MCP tool hitting "
+                "its timeout or a transient model/network error — please retry."
+            )
+        return (
+            "I couldn't complete this request within the available steps — the orchestrator "
+            "did not reach a tool that produced a result. Please retry or narrow the request."
+        )
+    return final_response
 
 
 class CoScientistManager:
@@ -271,47 +334,14 @@ class CoScientistManager:
                 "attempting partial delivery from captured S3 artifacts."
             )
 
-        # Deterministic finalizer (F010.A5/A6): the orchestrator LLM sometimes drops a
-        # successfully-generated result. The real molecules live behind a presigned S3 URL
-        # that fedot_tool captured into state['fedot_artifacts']. If that result is not
-        # already in the answer, DOWNLOAD the file and append a preview of its contents (read
-        # from S3, not fabricated) plus the link, so generated molecules always reach the user.
-        try:
-            session = await self.session_service.get_session(
-                app_name=self.app_name, user_id=self.user_id, session_id=self.session_id,
-            )
-            arts = (getattr(session, "state", None) or {}).get("fedot_artifacts") if session else None
-        except Exception:
-            arts = None
-        if arts:
-            missing = [a for a in arts if a.get("url") and a["url"] not in (final_response or "")]
-            if missing:
-                blocks = []
-                for a in missing:
-                    url = a["url"]
-                    cnt = a.get("generated_count")
-                    tag = f" ({cnt} molecules)" if cnt else ""
-                    preview = await asyncio.to_thread(_s3_csv_preview, url)
-                    block = f"**Generated molecules{tag}** — [download full CSV]({url})"
-                    if preview:
-                        block += f"\n```\n{preview}\n```"
-                    blocks.append(block)
-                final_response = (final_response or "").rstrip() + "\n\n---\n" + "\n\n".join(blocks)
-
-        if not (final_response or "").strip():
-            if run_error is not None:
-                final_response = (
-                    f"The run stopped early ({type(run_error).__name__}) before producing a result, "
-                    "and no partial artifacts were captured. This is usually a slow MCP tool hitting "
-                    "its timeout or a transient model/network error — please retry."
-                )
-            else:
-                final_response = (
-                    "I couldn't complete this request within the available steps — the orchestrator "
-                    "did not reach a tool that produced a result. Please retry or narrow the request."
-                )
-
-        return final_response
+        return await finalize_response_with_artifacts(
+            session_service=self.session_service,
+            app_name=self.app_name,
+            user_id=self.user_id,
+            session_id=self.session_id,
+            final_response=final_response,
+            run_error=run_error,
+        )
 
     async def close(self):
         """Cleanup session-related resources and uploaded paper artifacts."""
