@@ -198,9 +198,6 @@ def fetch_artifact_table(
 ) -> Optional[Dict[str, Any]]:
     """Download + parse an artifact URL. Returns None on any failure.
 
-    Uses the same download conventions as ``reporting.collect`` (html-unescape
-    presigned URLs, ``requests``) so MinIO/S3 SigV4 query params are not corrupted
-    by ``&amp;`` escaping from MCP envelopes.
     """
     if not url:
         return None

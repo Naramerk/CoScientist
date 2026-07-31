@@ -81,9 +81,7 @@ agents:
       # Catch hallucinated tool calls (e.g. the orchestrator inventing a
       # sub-agent's `execute_bash`) and correct them, instead of ADK raising
       # ValueError('Tool not found') and crashing the whole run.
-      # force_final_when_fedot_deliverable: convert a redundant CoderAgent call
-      # into a Final Response once FEDOT already captured the deliverable.
-      after_model: [guard_unknown_tools, force_final_when_fedot_deliverable]
+      after_model: [guard_unknown_tools]
       # after_model: [pre_action_critique]
       # The post-action critic is intentionally not wired; add
       # `after_tool: [post_action_critique]` to enable it — the orchestrator

@@ -354,52 +354,6 @@ def refuse_when_fedot_deliverable(
     return types.Content(role="model", parts=[types.Part(text=message)])
 
 
-# Orchestrator must not keep re-calling Coder after artifacts exist (w5 loop).
-_ORCH_BLOCKED_WHEN_FEDOT_READY = frozenset({"CoderAgent"})
-
-
-def force_final_when_fedot_deliverable(
-    callback_context: CallbackContext, llm_response: LlmResponse
-) -> Optional[LlmResponse]:
-    """after_model on Orchestrator: convert a redundant CoderAgent call into a Final Response.
-
-    Same conservative ``should_hard_stop_fedot`` predicate as
-    ``refuse_when_fedot_deliverable`` — only fires when nothing new is pending.
-    """
-    from CoScientist.tools.fedot_artifact_handoff import should_hard_stop_fedot
-
-    state = callback_context.state
-    if not should_hard_stop_fedot(state):
-        return None
-    content = getattr(llm_response, "content", None)
-    parts = getattr(content, "parts", None) if content is not None else None
-    if not parts:
-        return None
-    blocked = [
-        getattr(getattr(p, "function_call", None), "name", None)
-        for p in parts
-        if getattr(getattr(p, "function_call", None), "name", None)
-        in _ORCH_BLOCKED_WHEN_FEDOT_READY
-    ]
-    if not blocked:
-        return None
-    urls = _artifact_urls(state.get("fedot_artifacts"))
-    body = "\n".join(f"- {u}" for u in urls) if urls else "- (see fedot_artifacts)"
-    msg = (
-        f"{FEDOT_DELIVERABLE_READY_TOKEN}: refusing `{', '.join(blocked)}` — "
-        "S3 artifacts already captured. Do not call CoderAgent again.\n\n"
-        "=== Final Response ===\n"
-        "Molecule generation completed. Downloadable results:\n"
-        f"{body}\n"
-    )
-    logger.info(
-        "[%s] forcing Final Response — blocked %s after fedot deliverable",
-        _agent_name(callback_context),
-        blocked,
-    )
-    return LlmResponse(content=types.Content(role="model", parts=[types.Part(text=msg)]))
-
-
 def make_unknown_tool_guard(valid_names: Iterable[str]) -> Callable:
     """Build an after_model_callback that intercepts hallucinated tool calls.
 

@@ -642,11 +642,6 @@ def _refuse_when_fedot_deliverable():
     return refuse_when_fedot_deliverable
 
 
-def _force_final_when_fedot_deliverable():
-    from CoScientist.agents.callbacks import force_final_when_fedot_deliverable
-    return force_final_when_fedot_deliverable
-
-
 def _before_get_task():
     from CoScientist.agents.callbacks import before_get_task
     return before_get_task
@@ -753,12 +748,6 @@ _cb(
     "refuse_when_fedot_deliverable",
     "before_agent",
     factory=lambda ctx: _refuse_when_fedot_deliverable(),
-)
-# Orchestrator: rewrite a redundant CoderAgent call into Final Response when ready.
-_cb(
-    "force_final_when_fedot_deliverable",
-    "after_model",
-    factory=lambda ctx: _force_final_when_fedot_deliverable(),
 )
 # Load active tasks into agent state before the agent runs.
 _cb("before_get_task", "before_agent", factory=lambda ctx: _before_get_task())

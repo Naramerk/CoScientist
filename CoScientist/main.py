@@ -104,9 +104,7 @@ def _s3_csv_preview(url: str, max_rows: int = 10, max_bytes: int = 200_000) -> s
     import csv
     import html
     import io
-
     import requests
-
     try:
         resp = requests.get(html.unescape(url), timeout=20)
         resp.raise_for_status()

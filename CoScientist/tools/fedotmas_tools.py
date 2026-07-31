@@ -60,7 +60,7 @@ class FedotMASToolset(BaseToolset):
             Result of the executed MAS pipeline.
         """
         state = tool_context.state if tool_context is not None else {}
-
+        filtered_tools = state.get('filtered_tools', [])
         # Hard-stop after deliverable — unless a new consumer tool was retrieved
         # (gen→dock handoff), see fedot_artifact_handoff.should_hard_stop_fedot.
         # Kill-switch: COSCIENTIST_FEDOT_HARD_STOP=0.
@@ -75,14 +75,11 @@ class FedotMASToolset(BaseToolset):
                     "Use existing artifacts / URLs for the Final Response."
                 ),
             }
-
         servers = []
-        filtered_tools = state.get('filtered_tools', [])
         postgres = PostgresClient(settings.postgres)
         try:
             await postgres.initialize()
             try:
-                filtered_tools = state.get('filtered_tools', [])
                 server_ids = set([t['server_id'] for t in filtered_tools])
                 servers = [await postgres.get_server(server_id) for server_id in server_ids]
             finally:
