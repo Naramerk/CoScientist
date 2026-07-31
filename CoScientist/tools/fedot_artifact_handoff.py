@@ -15,11 +15,11 @@ whether an agent should refuse to re-run once a deliverable is already captured.
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
 import logging
 import os
-import urllib.request
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
 
 _log = logging.getLogger(__name__)
@@ -196,12 +196,22 @@ def parse_artifact_table(
 def fetch_artifact_table(
     url: str, *, max_rows: int = _MAX_ROWS, max_bytes: int = _MAX_BYTES
 ) -> Optional[Dict[str, Any]]:
-    """Download + parse an artifact URL. Returns None on any failure."""
+    """Download + parse an artifact URL. Returns None on any failure.
+
+    Uses the same download conventions as ``reporting.collect`` (html-unescape
+    presigned URLs, ``requests``) so MinIO/S3 SigV4 query params are not corrupted
+    by ``&amp;`` escaping from MCP envelopes.
+    """
     if not url:
         return None
     try:
-        with urllib.request.urlopen(url, timeout=20) as resp:
-            raw = resp.read(max_bytes).decode("utf-8", "replace")
+        import requests
+
+        # Same as reporting.collect._download: MCP servers often HTML-escape the
+        # presigned URL; downloading the literal string corrupts SigV4 params.
+        resp = requests.get(html.unescape(url), timeout=20)
+        resp.raise_for_status()
+        raw = resp.content[:max_bytes].decode("utf-8", "replace")
     except Exception as exc:  # noqa: BLE001
         _log.info("artifact handoff: fetch failed for %s (%s)", url[:120], exc)
         return None

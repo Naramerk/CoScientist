@@ -51,6 +51,11 @@ def _fedot():
     return fedot_toolset_instance
 
 
+def _result_formatter():
+    from CoScientist.tools import result_formatter_tool
+    return result_formatter_tool
+
+
 def _dynamic_tools():
     from CoScientist.tools import dynamic_mcp_toolset_instance
     return dynamic_mcp_toolset_instance
@@ -64,6 +69,11 @@ def _medical():
 def _coder():
     from CoScientist.tools import coder_toolset_instance
     return coder_toolset_instance
+
+
+def _alembic():
+    from CoScientist.tools.alembic_tools import ALEMBIC_TOOLS
+    return ALEMBIC_TOOLS
 
 def _task_tracker():
     from CoScientist.tools import task_tracker_instance
@@ -98,6 +108,13 @@ def _research_graph_orchestrator():
         return None
     from CoScientist.graph.research.agent_tools import research_orchestrator_toolset
     return research_orchestrator_toolset
+
+
+def _research_graph_readonly():
+    if not _research_graph_enabled():
+        return None
+    from CoScientist.graph.research.agent_tools import research_reporter_toolset
+    return research_reporter_toolset
 
 REGISTRY.register_tool(ToolEntry(
     key="websearch",
@@ -313,6 +330,16 @@ REGISTRY.register_tool(ToolEntry(
     docs=_RESEARCH_ORCH_DOCS,
 ))
 
+# Read-only surface for the Result Aggregator: overview / slice / provenance,
+# no research_commit (the reporter reads the finished graph, never mutates it).
+REGISTRY.register_tool(ToolEntry(
+    key="research_graph_readonly",
+    factory=_research_graph_readonly,
+    optional=True,
+    runtime_resolved=True,
+    docs=(_RESEARCH_OVERVIEW_DOC, _RESEARCH_SLICE_DOC, _RESEARCH_PROVENANCE_DOC),
+))
+
 REGISTRY.register_tool(ToolEntry(
     key="create_plan_tool",
     factory=_create_plan_tool,
@@ -348,6 +375,22 @@ REGISTRY.register_tool(ToolEntry(
             name="fedot_tool",
             signature="fedot_tool(task_description)",
             purpose="Builds and executes a multi-agent pipeline to solve the task.",
+        ),
+    ),
+))
+
+REGISTRY.register_tool(ToolEntry(
+    key="result_formatter",
+    factory=_result_formatter,
+    docs=(
+        ToolDoc(
+            name="format_results",
+            signature="format_results()",
+            purpose=(
+                "Collect every figure and data table this run produced (from session "
+                "artifacts and the sandbox workspace) into the per-run report folder and "
+                "return ready-to-embed Markdown blocks (image embeds + tables). Call FIRST."
+            ),
         ),
     ),
 ))
@@ -468,6 +511,48 @@ REGISTRY.register_tool(ToolEntry(
     ),
 ))
 
+REGISTRY.register_tool(ToolEntry(
+    key="alembic",
+    factory=_alembic,
+    docs=(
+        ToolDoc(
+            name="build_mcp_server",
+            signature="build_mcp_server(repo_url, force_rebuild)",
+            purpose=(
+                "Start an Alembic build: turn a scientific GitHub repository into "
+                "a served MCP tool server (clone -> env -> generated+validated "
+                "tools -> FastMCP server in Docker)."
+            ),
+            usage=(
+                "Returns immediately with a job_id; the build itself runs in the "
+                "background and takes tens of minutes — report the job_id and "
+                "do NOT poll it in a tight loop, check back later instead.",
+                "Reuses an already running/done build for the same repo_url "
+                "unless force_rebuild=true is passed.",
+            ),
+        ),
+        ToolDoc(
+            name="check_mcp_build",
+            signature="check_mcp_build(job_id)",
+            purpose=(
+                "Check the status of a build started by build_mcp_server: "
+                "\"running\" with the current pipeline stage and a log tail, "
+                "\"done\" with the served mcp_url/image/container, or \"failed\" "
+                "with the error tail of the build log."
+            ),
+        ),
+        ToolDoc(
+            name="list_mcp_builds",
+            signature="list_mcp_builds()",
+            purpose=(
+                "List every Alembic build known to this process (running and "
+                "finished) — use it to find a build from an earlier "
+                "delegation/session (e.g. a lost job_id)."
+            ),
+        ),
+    ),
+))
+
 # HITL tools are not a YAML-listed tool entry: the assembler attaches them via
 # the per-agent `hitl: true` flag (when HITL is globally enabled) and appends
 # these docs so the prompt always matches.
@@ -520,6 +605,11 @@ def _inject_uploaded_papers():
 def _log_research_tool_calls():
     from CoScientist.agents.callbacks import print_research_agent_tool_call
     return print_research_agent_tool_call
+
+
+def _capture_mcp_artifacts():
+    from CoScientist.agents.callbacks import capture_mcp_artifacts
+    return capture_mcp_artifacts
 
 
 def _skip_retriever_context():
@@ -646,6 +736,7 @@ _cb("seed_coder_workspace", "before_model", factory=lambda ctx: _seed_coder_work
 _cb("inject_medical_artifacts", "before_model", factory=lambda ctx: _inject_medical_artifacts())
 _cb("inject_uploaded_papers", "before_model", factory=lambda ctx: _inject_uploaded_papers())
 _cb("log_research_tool_calls", "after_tool", factory=lambda ctx: _log_research_tool_calls())
+_cb("capture_mcp_artifacts", "after_tool", factory=lambda ctx: _capture_mcp_artifacts())
 _cb("skip_retriever_context", "before_model", factory=lambda ctx: _skip_retriever_context())
 _cb("collect_reranked_tools", "after_agent", factory=lambda ctx: _collect_reranked_tools())
 _cb(
