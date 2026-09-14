@@ -122,6 +122,39 @@ def test_replayed_validation_input_matches_the_generated_signature(monkeypatch, 
     assert validation["input"] == {"smi": "CCO"}
 
 
+
+def _debug_call(monkeypatch, tmp_path, args, workdir=None):
+    used = {}
+    monkeypatch.setattr(build_api, "_invoke_in_container",
+                        lambda snap, tool, a: used.update(args=a) or {"ok": True, "result": 1})
+    client = _client(monkeypatch, tmp_path, workdir=workdir)
+    with client.websocket_connect(f"/builds/ws/{_JOB}") as ws:
+        _next(ws, "status")
+        ws.send_json({"type": "invoke", "tool": "info", "mode": "container",
+                      "call_id": 1, "args": args})
+        _next(ws, "invoke_result")
+    return used["args"]
+
+
+def test_the_debug_run_leaves_out_scope_params_the_function_does_not_take(monkeypatch, tmp_path):
+    """The call form is filled from the MCP schema, where every tool also has
+    user_id/session_id for the S3 scope. The function itself would reject them."""
+    tools = tmp_path / "work" / "gget" / "output" / "tools"
+    tools.mkdir(parents=True)
+    (tools / "info.py").write_text("def info(q, user_id=None):\n    return {}\n")
+
+    args = _debug_call(monkeypatch, tmp_path, {"q": "brca1", "user_id": "u", "session_id": ""},
+                       workdir=tmp_path / "work")
+
+    assert args == {"q": "brca1", "user_id": "u"}
+
+
+def test_without_readable_code_the_debug_run_drops_only_empty_scope_params(monkeypatch, tmp_path):
+    args = _debug_call(monkeypatch, tmp_path, {"q": "brca1", "user_id": "", "session_id": "s"})
+
+    assert args == {"q": "brca1", "session_id": "s"}
+
+
 # ── MCP path ─────────────────────────────────────────────────────────────────
 
 

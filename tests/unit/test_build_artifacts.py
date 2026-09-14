@@ -47,3 +47,10 @@ def test_a_function_taking_kwargs_gets_every_arg(tmp_path):
     args = {"smi": "CCO", "mols": "m"}
 
     assert artifacts.call_args_for(wd, _REPO, "find_prop", args) == args
+
+
+def test_declared_params_are_unknown_without_readable_code(tmp_path):
+    wd = _workdir(tmp_path, "def find_prop(smi, *, steps=1):\n    return {}\n")
+
+    assert artifacts.declared_params(wd, _REPO, "find_prop") == {"smi", "steps"}
+    assert artifacts.declared_params(wd, _REPO, "missing") is None

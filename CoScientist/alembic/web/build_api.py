@@ -385,6 +385,21 @@ async def api_mcp_tools(job_id: str):
     return JSONResponse({"tools": {t.name: t.inputSchema for t in listed.tools}})
 
 
+# The generated MCP server adds these to every tool for the S3 key scope.
+_SCOPE_ARGS = ("user_id", "session_id")
+
+
+def _container_args(job_id: str, repo_url: str, tool: str, args: dict) -> dict:
+    """``args`` for the tool function itself. The call form is filled from the
+    MCP schema, where every tool also takes the S3 scope params, and the
+    function accepts them only when it declares them. When its code cannot be
+    read, a scope param is dropped if it is empty, as the form leaves it."""
+    workdir = alembic_tools.web_build_workdir(job_id)
+    declared = artifacts.declared_params(workdir, repo_url, tool) if workdir else None
+    return {k: v for k, v in args.items()
+            if k not in _SCOPE_ARGS or (k in declared if declared is not None else v != "")}
+
+
 async def _answer_invoke(ws: WebSocket, job_id: str, msg: dict) -> None:
     tool, call_id = msg.get("tool"), msg.get("call_id")
     args = msg.get("args") or {}
@@ -396,6 +411,7 @@ async def _answer_invoke(ws: WebSocket, job_id: str, msg: dict) -> None:
     elif not tool or not isinstance(args, dict):
         res = {"ok": False, "error": "a tool name and a JSON object of args are required"}
     elif via == "container":
+        args = _container_args(job_id, snap.get("repo_url") or "", tool, args)
         res = await asyncio.to_thread(_invoke_in_container, snap, tool, args)
     else:
         res = await _invoke_via_mcp(snap, tool, args)

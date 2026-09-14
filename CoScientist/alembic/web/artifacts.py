@@ -133,6 +133,16 @@ def _tool_def(workdir: Path, repo_url: str, name: str):
     return None
 
 
+def declared_params(workdir: Path, repo_url: str, name: str) -> set[str] | None:
+    """The parameter names of the generated function ``name``, or None when it
+    takes ``**kwargs`` or its code cannot be read."""
+    fn = _tool_def(workdir, repo_url, name)
+    if fn is None or fn.args.kwarg is not None:
+        return None
+    a = fn.args
+    return {p.arg for p in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
+
+
 def call_args_for(workdir: Path, repo_url: str, name: str, args: dict) -> dict:
     """``args`` without the keys the generated function does not accept.
 
@@ -140,11 +150,9 @@ def call_args_for(workdir: Path, repo_url: str, name: str, args: dict) -> dict:
     it with other parameters. Kept as they are when the function takes
     ``**kwargs`` or cannot be read.
     """
-    fn = _tool_def(workdir, repo_url, name)
-    if fn is None or fn.args.kwarg is not None:
+    names = declared_params(workdir, repo_url, name)
+    if names is None:
         return args
-    a = fn.args
-    names = {p.arg for p in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
     return {k: v for k, v in args.items() if k in names}
 
 
