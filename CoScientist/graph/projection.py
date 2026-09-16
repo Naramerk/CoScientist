@@ -198,6 +198,12 @@ def _turn_resolver(nodes: List[Dict[str, Any]]):
                 current = goal_turn
             else:
                 break
+        # Something that ran before every request still ran. Stranding it in a
+        # request nobody can open loses it from every view at once — one
+        # session showed 35 of its 130 calls that way, and the evidence linking
+        # to the other 95 led nowhere. The first request is where it goes.
+        if current is None and goals:
+            current = goals[0][1]
         return current or "untagged"
 
     return resolve
@@ -337,16 +343,23 @@ def execution_tree(full: Dict[str, Any],
     edges = [e for e in edges
              if e.get("src") in nodes and e.get("dst") in nodes]
 
-    # An agent that nothing called is roster, not history.
+    # Calls move onto their agent BEFORE the roster prune below, so that an
+    # agent which did work in this request is visibly not roster.
+    edges = _fold_calls_into_agents(nodes, edges)
+
+    # An agent that nothing called, and that did nothing, is roster not history.
     called = {e["dst"] for e in edges}
     for node_id, node in list(nodes.items()):
-        if node.get("kind") in ("agent", "agent_call") and node_id not in called:
+        if (node.get("kind") in ("agent", "agent_call")
+                and node_id not in called and not node.get("calls")):
             nodes.pop(node_id)
     edges = [e for e in edges if e["src"] in nodes and e["dst"] in nodes]
 
     if collapse_tools:
         edges = _fold_calls_into_agents(nodes, edges)
     _borrow_io(nodes, every_before_scope, edges)
+    edges = _attach_loose_agents_to_the_request(nodes, edges)
+    _keep_agents_inside_the_request(nodes)
     _number_stages(nodes)
     for node in nodes.values():
         if node.get("kind") in _AGENTS:
@@ -387,7 +400,8 @@ def execution_tree(full: Dict[str, Any],
                      key=lambda n: (n.get("t_start") or 0.0, n["level"]))
     _place_in_time(ordered, edges)
     return {"run_id": full.get("run_id"), "nodes": ordered, "edges": edges,
-            "turns": catalogue, "turn_id": chosen}
+            "turns": catalogue, "turn_id": chosen,
+            "phases": _phases_of(ordered)}
 
 
 _AGENTS = ("agent", "agent_call")
@@ -435,6 +449,81 @@ def _fold_calls_into_agents(nodes: Dict[str, Dict[str, Any]],
             agent["t_end"] = last
 
     return [e for e in edges if e["src"] in nodes and e["dst"] in nodes]
+
+
+def _attach_loose_agents_to_the_request(
+        nodes: Dict[str, Dict[str, Any]],
+        edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Join an agent nothing delegated to onto the request it worked in.
+
+    The lifecycle stages around the orchestrator — the one that seeds the
+    context, the one that assembles the report at the end — are not delegated
+    to by anybody: they are wired into the run itself. So no edge names them,
+    and they are drawn floating beside the trace with no place in the order of
+    events. Naming the agent per request does not change that: a stage nobody
+    calls still has nothing pointing at it.
+
+    They did work in this request, which is why they are here at all, so they
+    hang off the request itself. The edge is marked synthetic: it says "this
+    also ran", not "the request called it".
+    """
+    goals = sorted((n for n in nodes.values() if n.get("kind") == "goal"),
+                   key=lambda n: n.get("t_start") or 0.0)
+    if not goals:
+        return edges
+
+    root = goals[0]["id"]
+    reached = {e["dst"] for e in edges}
+    return edges + [
+        {"src": root, "dst": node_id, "type": "ran_in", "synthetic": True}
+        for node_id, node in nodes.items()
+        if node.get("kind") in _AGENTS and node_id not in reached and node_id != root
+    ]
+
+
+def _keep_agents_inside_the_request(nodes: Dict[str, Dict[str, Any]]) -> None:
+    """Pull an agent whose clock is from another request back into this one.
+
+    Folding bounds an agent by its own calls, which settles anything that did
+    measurable work. An agent that made none keeps whatever was written on it,
+    and in a snapshot recorded before agents were named per request that is the
+    last time the agent ran ANYWHERE: days past the request being drawn, which
+    sorts it after everything and leaves x carrying no time at all.
+
+    Only such an agent is moved, and only to the start of the request it is
+    drawn in. An agent whose calls are here is left exactly as it is even when
+    its clock looks wrong: that disagreement is a request wrongly attributed,
+    and rewriting the times would hide it rather than fix it.
+    """
+    starts = [n.get("t_start") for n in nodes.values()
+              if n.get("kind") == "goal" and n.get("t_start") is not None]
+    if not starts:
+        return
+    opened = min(starts)
+    # The far edge is read off the calls and the answer, never off an agent:
+    # an agent carrying another request's clock would widen the window it is
+    # meant to be caught by, and catch nothing.
+    inside = [c.get("t_end") or c.get("t_start")
+              for n in nodes.values() for c in (n.get("calls") or [])
+              if (c.get("t_end") or c.get("t_start")) is not None]
+    inside += [n.get("t_end") or n.get("t_start") for n in nodes.values()
+               if n.get("kind") == "result"
+               and (n.get("t_end") or n.get("t_start")) is not None]
+    if not inside:
+        # Nothing in the request says when it ended, so there is no window to
+        # judge an agent against. The goal's own start is not one: measuring
+        # against it would call every agent late and drag them all onto it.
+        return
+    latest = max(inside)
+
+    for node in nodes.values():
+        if node.get("kind") not in _AGENTS or node.get("calls"):
+            continue
+        started = node.get("t_start")
+        if started is None or started < opened or started > latest:
+            node["t_start"] = opened
+            if node.get("t_end") is not None and node["t_end"] > latest:
+                node["t_end"] = None
 
 
 def _number_stages(nodes: Dict[str, Dict[str, Any]]) -> None:
@@ -529,6 +618,85 @@ def _borrow_io(nodes: Dict[str, Dict[str, Any]], every: List[Dict[str, Any]],
             node["io_source"] = "request"
 
 
+#: What kind of work an agent does, so a request reads as the stretches it
+#: went through rather than as a row of names. The orchestrator is
+#: deliberately absent: it conducts every stretch and belongs to none, so a
+#: phase of its own would cut the picture into slivers.
+_PHASE_OF_AGENT = {
+    "ContextInitAgent": "framing",
+    "PlannerAgent": "framing",
+    "PlanningPipelineAgent": "framing",
+    "HypothesesAgent": "framing",
+
+    "ResearchAgent": "research",
+    "MedicalAgent": "research",
+    "DatasetCollectorAgent": "research",
+
+    "TaskExecutorAgent": "experiment",
+    "CoderAgent": "experiment",
+    "ExperimentAgent": "experiment",
+    "ExecutorSwitchAgent": "experiment",
+    "FedotAgent": "experiment",
+    "McpBuilderAgent": "experiment",
+    "ToolPipelineAgent": "experiment",
+    "ToolPreparerAgent": "experiment",
+
+    "ResultAggregatorAgent": "report",
+}
+
+#: Shown on the band, in the language the research graph already speaks.
+_PHASE_WORDS = {
+    "framing": "постановка",
+    "research": "поиск и данные",
+    "experiment": "эксперимент",
+    "report": "отчёт",
+}
+
+
+def _phases_of(ordered: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The stretches a request went through, as bands along the time axis.
+
+    Read off the agents that did the work, in the order they were placed. An
+    agent with no phase of its own — the orchestrator, and anything not in the
+    table — takes the phase of the next agent that has one, since a conductor
+    is introducing what comes next; failing that, the one before.
+    Neighbouring agents of the same phase make one band.
+
+    Given as pixel spans rather than times because the canvas is already laid
+    out: a band that agreed with the clock but not with the cards would frame
+    the wrong ones.
+    """
+    agents = [n for n in ordered
+              if n.get("kind") in _AGENTS and n.get("x") is not None]
+    if not agents:
+        return []
+    agents.sort(key=lambda n: n["x"])
+
+    named = [_PHASE_OF_AGENT.get(str(n.get("executor_agent") or n.get("label") or ""))
+             for n in agents]
+    for i in range(len(named) - 2, -1, -1):
+        if named[i] is None:
+            named[i] = named[i + 1]
+    for i in range(1, len(named)):
+        if named[i] is None:
+            named[i] = named[i - 1]
+    if not any(named):
+        return []
+
+    bands: List[Dict[str, Any]] = []
+    for node, phase in zip(agents, named):
+        if phase is None:
+            continue
+        right = node["x"] + (node.get("card_width") or _CARD_WIDTH)
+        if bands and bands[-1]["phase"] == phase:
+            bands[-1]["x1"] = max(bands[-1]["x1"], right)
+            bands[-1]["agents"] += 1
+        else:
+            bands.append({"phase": phase, "label": _PHASE_WORDS.get(phase, phase),
+                          "x0": node["x"], "x1": right, "agents": 1})
+    return bands
+
+
 def _scope_to_turn(every, all_edges, resolve, chosen):
     """The nodes belonging to one request, agents included.
 
@@ -580,8 +748,10 @@ def _scope_to_turn(every, all_edges, resolve, chosen):
 #: A card is this wide on screen, and two of them in one lane need this much
 #: clear space between their left edges or they overlap. Getting this wrong is
 #: what made consecutive calls sit on top of each other: time alone decided x,
-#: and a busy second put several 190-pixel cards inside forty pixels.
-_CARD_WIDTH, _CARD_GAP = 190, 26
+#: and a busy second put several cards inside forty pixels. Now that a request
+#: is a handful of agents rather than a hundred calls, there is room for a wide
+#: card and nothing left to crowd it.
+_CARD_WIDTH, _CARD_GAP = 320, 40
 _LANE_PITCH = _CARD_WIDTH + _CARD_GAP
 
 #: How far the clock moves a node, and the most a single idle stretch may
@@ -589,7 +759,7 @@ _LANE_PITCH = _CARD_WIDTH + _CARD_GAP
 #: the whole picture and the calls either side of it are a smudge, so long
 #: waits compress and the order is what survives.
 _MAX_STEP, _PIXELS_PER_SECOND = 420, 8.0
-_ROW_HEIGHT = 210
+_ROW_HEIGHT = 150
 #: Distance between two sub-rows inside one agent's band.
 _SUB_ROW_HEIGHT = 68
 
