@@ -213,14 +213,6 @@ REGISTRY.register_tool(ToolEntry(
         ToolDoc(
             name="explore_scientific_database",
             signature="explore_scientific_database(task)",
-            purpose=(
-                "RAG over the internal scientific-literature corpus "
-                "(deployed paper-analysis MCP)."
-            ),
-        ),
-        ToolDoc(
-            name="explore_chemistry_database",
-            signature="explore_chemistry_database(task)",
             purpose="RAG search over an internal scientific literature database.",
         ),
         ToolDoc(
@@ -902,6 +894,18 @@ WORK_ORDER_TOOL_DOCS = (
         purpose=(
             "(Work Order) Mark a step in_progress / done / skipped as you go, so the "
             "human can follow the plan live."
+        ),
+    ),
+    ToolDoc(
+        name="submit_work_report",
+        signature=(
+            "submit_work_report(summary, findings, done_verdict, done_evidence, "
+            "actual_outcome, artifacts)"
+        ),
+        purpose=(
+            "(Work Order) Before your final answer, report what you found (with "
+            "evidence) and produced. The human accepts it, sends it back for rework "
+            "or rejects it. Returns status accepted / revise / rejected."
         ),
     ),
 )

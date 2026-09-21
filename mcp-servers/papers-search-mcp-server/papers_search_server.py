@@ -66,7 +66,7 @@ def search_entity(entity_type: str, entity_name: str, email: str = None, api_key
         email: Optional OpenAlex mailto / polite-pool email (overrides headers/env).
         api_key: Optional OpenAlex API key (overrides headers/env).
     """
-    email, api_key = _get_credentials(email, api_key)
+    email, api_key = _get_credentials()
     client = OpenAlexClient(email=email, api_key=api_key)
     result = client.search_entity(entity_type=entity_type, entity_name=entity_name)
     if result:
@@ -105,7 +105,7 @@ def search_papers(
         email: Optional OpenAlex mailto / polite-pool email (overrides headers/env).
         api_key: Optional OpenAlex API key (overrides headers/env).
     """
-    email, api_key = _get_credentials(email, api_key)
+    email, api_key = _get_credentials()
     client = OpenAlexClient(email=email, api_key=api_key)
     response = client.search_works(
         keywords=keywords,
@@ -164,7 +164,7 @@ def download_papers_from_search(
     Each uploaded paper carries ``bucket``, ``s3_key`` and ``presigned_url``. The
     bucket and the key are the durable reference. The URL expires in one hour.
     """
-    email, api_key = _get_credentials(email, api_key)
+    email, api_key = _get_credentials()
     client = OpenAlexClient(email=email, api_key=api_key)
     response = client.search_works(
         keywords=keywords,
@@ -199,7 +199,7 @@ def download_papers_from_search(
         file_name = f"{_sanitize_filename(str(title))}.pdf"
         s3_key = f"{s3_prefix.rstrip('/')}/{file_name}"
 
-        response = client.request_with_retry(endpoint=pdf_url, params={"api_key": api_key})
+        response = client.request_with_retry(endpoint=pdf_url)
         destination_path = f"{s3_prefix.rstrip('/')}/{file_name}"
         s3_client.upload_fileobj(BytesIO(response.content), s3_service.bucket_name, destination_path)
         logging.info(f"Uploaded paper '{title}' to S3 at {destination_path}")

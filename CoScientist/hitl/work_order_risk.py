@@ -47,7 +47,7 @@ TOOL_TIERS: dict[str, Tier] = {
     "tavily_crawl": Tier.COMPUTE,
     "search_papers": Tier.READ,
     "download_papers_from_search": Tier.COMPUTE,
-    "explore_chemistry_database": Tier.READ,
+    "explore_scientific_database": Tier.READ,
     "explore_my_papers": Tier.READ,
     # medical
     "search_pubmed": Tier.READ,
@@ -96,6 +96,7 @@ EXEMPT_TOOLS = frozenset({
     "declare_work_order",
     "update_work_order",
     "update_work_step",
+    "submit_work_report",
     "request_approval",
     "request_selection",
 })

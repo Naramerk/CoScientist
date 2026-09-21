@@ -440,13 +440,10 @@ def research(ctx: PromptContext) -> str:
             "have actual S3 keys — never invent S3 keys."
         )
         n += 1
+        # 2) Otherwise (or if no uploaded papers) always call explore_scientific_database first
         steps.append(
-            f"{n}. If there are NO user-uploaded papers, ALWAYS call the internal "
-            "scientific literature database first: `explore_scientific_database` "
-            "(argument `task`). If that name is not in your tool list, call "
-            "`explore_chemistry_database` instead. Do this even if you plan to use "
-            "`search_papers` afterwards. Do not treat the RAG answer as the end of "
-            "a literature review."
+            f"{n}. If there are NO user-uploaded papers, ALWAYS call `explore_scientific_database` before other literature tools. "
+            "Do this even if you plan to use `search_papers` or `download_papers_from_search` afterwards."
         )
         n += 1
 
