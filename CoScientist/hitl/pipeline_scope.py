@@ -126,8 +126,8 @@ def render_directive(scope: dict) -> str:
     skip_line = f"     Do NOT call {', '.join(skipped)}." if skipped else ""
     if "ExperimentModuleAgent" in names:
         retrieve = (
-            "Call `retrieve_tools` before ExperimentModuleAgent. "
-            "retrieve_tools must not add or drop agents.\n"
+            "Call `retrieve_tools` ONCE before the first ExperimentModuleAgent call. "
+            "retrieve_tools must not add or drop agents. Once ExperimentModuleAgent returns, DO NOT call retrieve_tools again.\n"
         )
     else:
         retrieve = "Do not call `retrieve_tools` to pick extra agents.\n"
@@ -135,7 +135,7 @@ def render_directive(scope: dict) -> str:
         "Human-fixed scope. Do not re-classify the user text. "
         "Orchestrate using only the agents named below, in that order.\n"
         + retrieve
-        + "   - Run these stages in sequence, then STOP:\n"
+        + "   - Run these stages in sequence, then STOP (provide final answer, do not call any tools after completion):\n"
         + stages
         + (("\n" + skip_line) if skip_line else "")
         + "\n"
@@ -244,6 +244,18 @@ def enforce_pipeline_scope_hops(callback_context, llm_response=None):
         return None
     nxt = next_named_agent(scope, getter(DONE_KEY) or [])
     if not nxt:
+        # All chosen lanes finished: do NOT allow retrieve_tools or other tool calls to loop
+        names = _function_names(llm_response)
+        if "retrieve_tools" in names or any(name in {agent for _, agent in LANES} for name in names):
+            from google.adk.models import LlmResponse
+            return LlmResponse(
+                content=genai_types.Content(
+                    role="model",
+                    parts=[genai_types.Part.from_text(
+                        text="All selected pipeline stages have finished. Synthesizing final response."
+                    )],
+                )
+            )
         return None
     names = _function_names(llm_response)
     allowed = set(named_agents(scope))

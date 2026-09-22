@@ -110,13 +110,13 @@ agents:
       Use this to generate and test hypotheses.
     prompt: hypotheses
     output_key: hypotheses
-    tools: [research_graph]
+    tools: [task_tracker, graph, research_graph]
     callbacks:
-      before_agent: [bootstrap_research_question_if_empty, inject_research_context]
-      before_model: [seed_hypotheses_from_em_request]
-      after_model: [enforce_hypothesis_research_commit, normalize_em_hypothesis_commit, guard_unknown_tools]
-      after_tool: [capture_hypotheses_after_research_commit]
-      after_agent: [commit_experiment_hypotheses]
+      before_agent: [before_get_task, inject_research_context, user_links]
+      before_model: [redact_link_urls]
+      after_model: [expand_link_refs, guard_unknown_tools]
+      before_tool: [resolve_link_refs]
+      after_tool: [register_tool_result_links]
 
   ResearchAgent:
     class: llm
@@ -200,12 +200,14 @@ agents:
     prompt: experiment_planner
     output_key: experiment_plan
     hitl: true
+    critic: ${web.planner_critic_enabled}
     callbacks:
       before_agent: [skip_when_experiment_stage_complete, skip_when_experiment_not_feasible, build_experiment_context]
       before_model: [skip_retriever_context]
       after_model: [sanitize_json_output]
     options:
       review_kind: plan
+      critic_max_rounds: ${web.planner_critic_rounds}
 
   ExperimentExecutorAgent:
     class: llm
@@ -219,6 +221,7 @@ agents:
       - FedotAgent
       - ExperimentAgent
       - CoderAgent
+      - DatasetCollectorAgent
       - McpBuilderAgent
       - ResearchAgent
       - MedicalAgent
@@ -271,7 +274,7 @@ agents:
     # Attempt-envelope anti-fabrication when used under ExperimentExecutor.
     # Not an orchestrator subordinate on this profile (elegant EM path).
     prompt: coder
-    tools: [coder, sandbox, research_graph]
+    tools: [coder, sandbox, research_graph, verify, dynamic_tools]
     subordinates: [DatasetCollectorAgent]
     output_key: coder_results
     callbacks:
@@ -298,15 +301,18 @@ agents:
       collects and assembles a dataset for a task from multiple sources
       (HuggingFace Datasets, scientific APIs like ChEMBL/PubChem/OpenAlex, and
       direct web/URL downloads), materialising it as files in the shared sandbox.
+      Also serves as ExperimentExecutorAgent route when start_task returns
+      route_agent=DatasetCollectorAgent.
     routing: >-
       when a step needs raw data gathered/assembled from external sources before
       building or training on it (e.g. "collect a dataset of BTK inhibitors with
       IC50"). It downloads into the shared workspace and writes a MANIFEST.
     prompt: dataset_collector
-    tools: [coder, sandbox, websearch, research_graph]
+    tools: [coder, sandbox, websearch, research_graph, verify, dynamic_tools]
     output_key: dataset_results
     callbacks:
       before_agent: [inject_research_context]
+      before_model: [seed_coder_workspace]
       after_model: [guard_unknown_tools]
 
   MedicalAgent:
@@ -413,9 +419,9 @@ agents:
     description: Agent to rerank retrieved MCP servers from RAG database of MCP tools for given task.
     prompt: tool_reranker
     output_key: reranked_tools
-    output_schema: tool_ranking
+    llm_timeout: 45
     callbacks:
-      before_agent: [stash_experiment_retrieved_capabilities]
+      before_agent: [shortlist_reranker_tools, stash_experiment_retrieved_capabilities]
       before_model: [skip_retriever_context]
       # sanitize_json_output also applies ToolRanking scores (race-safe).
       after_model: [sanitize_json_output]

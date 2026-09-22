@@ -6,11 +6,13 @@ patches survive review / can be dropped when upstream fixes land.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
 import re
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterable, Iterator, Mapping
 
 from google.adk.agents.base_agent import BaseAgent
 
@@ -25,6 +27,12 @@ from fedotmas.maw.models import MAWAgentConfig, MAWConfig
 from CoScientist.agents.callbacks.json_output import _unwrap_completion_state
 
 _log = logging.getLogger(__name__)
+
+# Plan-bound MCP function names. create_toolset otherwise exposes every tool
+# on the HTTP server, so FEDOT can call a sibling the planner did not bind.
+_ALLOWED_MCP_TOOLS: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
+    "coscientist_allowed_mcp_tools", default=None,
+)
 
 # LiteLLM-style provider prefixes. FEDOT's ``_ProxyClient`` forwards model names
 # as-is to OPENAI_BASE_URL; OpenRouter expects ``vendor/model`` (e.g.
@@ -128,6 +136,62 @@ def _install_parse_llm_output_unwrap() -> None:
     _helpers.parse_llm_output = parse_llm_output  # type: ignore[method-assign]
 
 
+def bound_mcp_tool_names(filtered_tools: Iterable[Any] | None) -> frozenset[str]:
+    """MCP function names the plan bound for this attempt (not the whole server)."""
+    names: set[str] = set()
+    for item in filtered_tools or []:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("tool") or item.get("name") or "").strip()
+        if name:
+            names.add(name)
+    return frozenset(names)
+
+
+def append_bound_mcp_tools(task_description: str, names: Iterable[str]) -> str:
+    listed = ", ".join(sorted({str(n).strip() for n in names if str(n).strip()}))
+    if not listed:
+        return task_description
+    return (
+        f"{task_description}\n\n"
+        "REQUIRED MCP tools (call only these; other tools on the same server "
+        f"are out of scope): {listed}."
+    )
+
+
+@contextmanager
+def allowed_mcp_tools_scope(names: Iterable[str] | None) -> Iterator[None]:
+    allowed = frozenset(str(n).strip() for n in (names or []) if str(n).strip())
+    token = _ALLOWED_MCP_TOOLS.set(allowed or None)
+    try:
+        yield
+    finally:
+        _ALLOWED_MCP_TOOLS.reset(token)
+
+
+def _install_mcp_tool_filter() -> None:
+    """Apply the plan-bound tool allowlist on every FEDOT McpToolset."""
+    from fedotmas.mas import builder as mas_builder
+    from fedotmas.maw import builder as maw_builder
+    from fedotmas.mcp import registry as mcp_registry
+
+    orig = mcp_registry.create_toolset
+    if getattr(orig, "_coscientist_tool_filter", False):
+        return
+
+    def create_toolset(name: str, registry: Any = None) -> Any:
+        ts = orig(name, registry=registry)
+        allowed = _ALLOWED_MCP_TOOLS.get()
+        if allowed:
+            ts.tool_filter = sorted(allowed)
+        return ts
+
+    create_toolset._coscientist_tool_filter = True  # type: ignore[attr-defined]
+    mcp_registry.create_toolset = create_toolset  # type: ignore[method-assign]
+    mas_builder.create_toolset = create_toolset  # type: ignore[method-assign]
+    maw_builder.create_toolset = create_toolset  # type: ignore[method-assign]
+
+
 def ensure_fedot_openai_proxy_compat() -> None:
     """Install wire-strip + MASConfig model-prefix fixes (idempotent).
 
@@ -135,6 +199,7 @@ def ensure_fedot_openai_proxy_compat() -> None:
     """
     _install_proxy_model_strip()
     _install_parse_llm_output_unwrap()
+    _install_mcp_tool_filter()
 
 
 # Configurable guard against injecting an unbounded task into every worker.

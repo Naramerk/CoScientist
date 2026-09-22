@@ -380,6 +380,7 @@ class ExperimentsSettings(BaseModel):
     route_fedot: bool = True
     route_coder_mcp: bool = False
     route_alembic: bool = False
+    evidence_strict: bool = False
     task_max_attempts: int = Field(default=2, ge=1, le=2)
     max_plan_tasks: int = Field(default=8, ge=1, le=20)
     # How many times a rejected result review may send the module back to
@@ -431,17 +432,31 @@ class ExperimentsSettings(BaseModel):
     )
     fallback_research: list[str] = Field(default_factory=lambda: ["research"])
     fallback_medical: list[str] = Field(default_factory=lambda: ["medical"])
+    fallback_dataset_collector: list[str] = Field(
+        default_factory=lambda: ["dataset_collector", "coder"]
+    )
 
     alembic_timeout_s: float = Field(default=1800.0, gt=0)
     alembic_poll_s: float = Field(default=5.0, gt=0)
     fedot_timeout_s: float = Field(default=600.0, gt=0)
     react_timeout_s: float = Field(default=600.0, gt=0)
     coder_timeout_s: float = Field(default=7200.0, gt=0)
+    dataset_collector_timeout_s: float = Field(default=3600.0, gt=0)
     research_timeout_s: float = Field(default=600.0, gt=0)
     medical_timeout_s: float = Field(default=600.0, gt=0)
     plan_review_timeout_s: float = Field(default=300.0, gt=0)
     result_review_timeout_s: float = Field(default=300.0, gt=0)
     complexity_warning_tasks: int = Field(default=6, ge=1, le=8)
+
+    # Architectural bounds and circuit breakers
+    max_retrieval_calls: int = Field(default=5, ge=1)
+    max_hypothesis_refs: int = Field(default=8, ge=1)
+    max_repo_candidates: int = Field(default=8, ge=1)
+    max_generated_data: int = Field(default=5, ge=1)
+    max_inline_bytes: int = Field(default=10_000_000, ge=1024)
+    text_snippet_limit: int = Field(default=800, ge=100)
+    desc_limit: int = Field(default=600, ge=50)
+    prompt_desc_limit: int = Field(default=450, ge=50)
 
 
 # =========================

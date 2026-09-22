@@ -380,3 +380,43 @@ def test_critique_allows_multiple_hypotheses_on_one_operation_via_also_tests():
     )
     assert not any("uncovered by non-optional" in i.message for i in critique.issues)
     assert not any("share the same operation_ref" in i.message for i in critique.issues)
+
+
+def test_invented_launch_param_is_major():
+    task = _task("EXP-1")
+    task["launch_params"] = {"label": "not-in-the-request"}
+    critique = critique_plan(
+        _plan(task), settings=ExperimentsSettings(), available_tools=_inventory(),
+    )
+    hit = next(i for i in critique.issues if i.code == "invented_launch_param")
+    assert hit.severity == "major"
+
+
+def test_launch_param_from_request_or_schema_is_allowed():
+    copied = _task("EXP-1")
+    copied["launch_params"] = {"label": "bounded", "upload": True}
+    copied_critique = critique_plan(
+        _plan(copied), settings=ExperimentsSettings(), available_tools=_inventory(),
+    )
+    assert not any(i.code == "invented_launch_param" for i in copied_critique.issues)
+
+    tools = _inventory()
+    tools[0]["input_schema"] = {
+        "type": "object",
+        "properties": {
+            "case": {"type": "string", "enum": ["alzheimer"]},
+            "num": {"type": "integer", "default": 10},
+        },
+    }
+    task = _task("EXP-1")
+    task["launch_params"] = {"case": "alzheimer", "num": 10}
+    critique = critique_plan(
+        _plan(task), settings=ExperimentsSettings(), available_tools=tools,
+    )
+    assert not any(i.code == "invented_launch_param" for i in critique.issues)
+
+    task["launch_params"] = {"num": 10}
+    bare = critique_plan(
+        _plan(task), settings=ExperimentsSettings(), available_tools=_inventory(),
+    )
+    assert any(i.code == "invented_launch_param" for i in bare.issues)

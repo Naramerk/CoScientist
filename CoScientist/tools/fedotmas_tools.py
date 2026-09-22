@@ -32,6 +32,9 @@ from CoScientist.tools.fedot_mas_patch import (
     MetaJsonRecoveryPlugin,
     PatchedMAS,
     PatchedMAW,
+    allowed_mcp_tools_scope,
+    append_bound_mcp_tools,
+    bound_mcp_tool_names,
     ensure_fedot_openai_proxy_compat,
 )
 from rag_tools import MCPServer
@@ -155,7 +158,20 @@ class FedotMASToolset(BaseToolset):
         launch_params = (envelope.get("task") or {}).get("launch_params") or {}
         if isinstance(launch_params, dict) and launch_params:
             for k, v in launch_params.items():
-                if k == "num" and v is not None:
+                if isinstance(v, dict):
+                    for subk, subv in v.items():
+                        if subk == "num" and subv is not None:
+                            task_description = (
+                                f"{task_description}\n\n"
+                                f"REQUIRED MCP args for {k}: num={subv}. "
+                                f"Do not generate more than {subv} molecules."
+                            )
+                        elif subv is not None and str(subv).strip():
+                            task_description = (
+                                f"{task_description}\n"
+                                f"REQUIRED MCP arg for {k}: {subk}={subv}."
+                            )
+                elif k == "num" and v is not None:
                     task_description = (
                         f"{task_description}\n\n"
                         f"REQUIRED MCP args: num={v}. "
@@ -166,6 +182,8 @@ class FedotMASToolset(BaseToolset):
                         f"{task_description}\n"
                         f"REQUIRED MCP arg: {k}={v}."
                     )
+        bound_names = bound_mcp_tool_names(filtered_tools)
+        task_description = append_bound_mcp_tools(task_description, bound_names)
 
         # F010.A3/A4: an after_tool_callback plugin captures S3 artifact links
         # (results_presigned_url) at the tool-call boundary, BEFORE FEDOT.MAS sub-agents
@@ -221,7 +239,8 @@ class FedotMASToolset(BaseToolset):
                     UsageMetricsPlugin(),
                 ],
             )
-            result = await mas.run(task_description, timeout=fedot_timeout_s)
+            with allowed_mcp_tools_scope(bound_names):
+                result = await mas.run(task_description, timeout=fedot_timeout_s)
         except (asyncio.TimeoutError, TimeoutError):
             status, err = "timeout", f"FEDOT.MAS exceeded {fedot_timeout_s}s"
         except Exception as e:

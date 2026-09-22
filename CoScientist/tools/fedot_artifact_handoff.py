@@ -16,12 +16,13 @@ import html
 import io
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence
 
 _log = logging.getLogger(__name__)
 
-_MAX_ROWS = 10
+_MAX_ROWS = int(os.getenv("COSCIENTIST_FEDOT_MAX_UPSTREAM_ROWS", "3"))
 _MAX_BYTES = 200_000
 # Presigned viz/binaries we never try to parse as a handoff table.
 _SKIP_EXTENSIONS = (".html", ".htm", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".svg")
@@ -162,16 +163,24 @@ def arg_names_from_input_schema(schema: Mapping[str, Any] | None) -> List[str]:
 def _projection_arg_names(
     tables: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[str, Any]]
 ) -> List[str]:
-    """Schema arg names ∪ table headers (casefold-unique; headers keep their case)."""
+    """Schema arg names that match table headers (only schema args that tools can consume)."""
+    schema_names: set[str] = set()
+    for tool in tools or []:
+        schema = tool.get("input_schema")
+        for arg in arg_names_from_input_schema(schema):
+            schema_names.add(arg.casefold())
+
+    # Only project columns from tables that correspond to an actual tool input schema parameter!
+    # Including raw table headers indiscriminately causes non-parameter columns
+    # (Brenk, QED, LogP, Polar Surface Area, etc.) to dump hundreds of values into the prompt.
     names: List[str] = []
     seen: set[str] = set()
-    for cand in (
-        *(name for tool in tools or [] for name in arg_names_from_input_schema(tool.get("input_schema"))),
-        *(col for table in tables or [] for col in table.get("columns") or []),
-    ):
-        if str(cand).casefold() not in seen:
-            seen.add(str(cand).casefold())
-            names.append(str(cand))
+    for table in tables or []:
+        for col in table.get("columns") or []:
+            c_low = str(col).casefold()
+            if c_low in schema_names and c_low not in seen:
+                seen.add(c_low)
+                names.append(str(col))
     return names
 
 

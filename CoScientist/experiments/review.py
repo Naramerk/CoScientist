@@ -9,7 +9,6 @@ from typing import Any, AsyncGenerator, Literal
 
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events.event import Event
-from google.adk.events.event_actions import EventActions
 from google.genai import types
 
 from CoScientist.config import get_settings
@@ -544,6 +543,52 @@ class ExperimentReviewSessionAgent(SessionAgent):
 
         critique_json = critique.model_dump(mode="json")
         state["experiment_plan_critique"] = critique_json
+        if critique.verdict != "approve":
+            # If plan revisions are exhausted or repeated blockers hit, salvage the plan
+            # by converting invalid/problematic tasks to route=coder rather than pausing in deadlock.
+            revisions = int(state.get("experiment_plan_revision_count") or 0)
+            hits = int(state.get("experiment_inventory_blocker_hits") or 0)
+            max_rev = get_settings().experiments.max_plan_revisions
+            if revisions >= max_rev - 1 or hits >= self.max_inventory_blocker_hits - 1:
+                problematic_task_ids = {
+                    i.task_id for i in critique.issues
+                    if i.is_blocking and i.task_id and i.task_id != "plan"
+                }
+                if not problematic_task_ids:
+                    problematic_task_ids = {t.id for t in plan.tasks}
+                downgraded = False
+                new_tasks = []
+                for t in plan.tasks:
+                    if t.id in problematic_task_ids:
+                        downgraded = True
+                        new_arts = [
+                            art.model_copy(update={"prepare_via": "coder"})
+                            for art in t.design.analysis_artifacts
+                        ]
+                        t_mod = t.model_copy(update={
+                            "route": ExecutionRoute.CODER,
+                            "mcp_servers": [],
+                            "launch_params": {},
+                            "design": t.design.model_copy(update={"analysis_artifacts": new_arts}),
+                        })
+                        new_tasks.append(t_mod)
+                    else:
+                        new_tasks.append(t)
+                if downgraded:
+                    _audit(f"EXPERIMENT_PLAN_DOWNGRADED_TO_CODER tasks={sorted(problematic_task_ids)}")
+                    plan = plan.model_copy(update={"tasks": new_tasks})
+                    critique_json["issues"].append({
+                        "issue_id": "RECOVERY",
+                        "severity": "minor",
+                        "category": "feasibility",
+                        "task_id": None,
+                        "message": f"Tasks {sorted(problematic_task_ids)} downgraded to coder route after exhausted revisions.",
+                        "suggestion": "Proceed with Coder execution.",
+                    })
+                    critique_json["verdict"] = "approve"
+                    state["experiment_plan_critique"] = critique_json
+                    critique = PlanCritique.model_validate(critique_json)
+
         if critique.verdict != "approve":
             issue_text = "; ".join(
                 f"{i.severity}/{i.category}: {i.message} Suggestion: {i.suggestion}"

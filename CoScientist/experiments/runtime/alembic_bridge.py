@@ -13,7 +13,6 @@ from CoScientist.experiments.runtime.shared import audit
 logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_TOOL = "alembic_built_tool"
-_ALEMBIC_DESC_MARKER = "Use the Alembic-built MCP"
 _MCP_ENDPOINT_RE = re.compile(r"https?://[^\s)\]\"'<>]+/mcp\b", re.I)
 
 
@@ -251,22 +250,6 @@ def pin_alembic_post_build_request(
     return True
 
 
-def stamp_alembic_science_description(
-    task: dict[str, Any], *, repo_url: str, source_request: str = "",
-) -> None:
-    """Keep the scientific ask; forbid 'write a Python script' as the alembic job."""
-    desc = str(task.get("description") or "").strip()
-    if _ALEMBIC_DESC_MARKER in desc:
-        return
-    ask = (source_request or desc or str(task.get("name") or "")).strip()
-    suffix = (
-        f" {_ALEMBIC_DESC_MARKER} from {repo_url} to carry out the scientific ask"
-        f"{': ' + ask if ask and ask != desc else ''}; "
-        "do not reimplement as a local Python script."
-    )
-    task["description"] = (f"{desc} {suffix}".strip() if desc else suffix.strip())
-
-
 def apply_alembic_success(
     state: MutableMapping[str, Any],
     runtime: dict[str, Any],
@@ -353,5 +336,4 @@ __all__ = [
     "harvest_alembic_mcp_url",
     "mcp_url_from_task_runtime",
     "pin_alembic_post_build_request",
-    "stamp_alembic_science_description",
 ]

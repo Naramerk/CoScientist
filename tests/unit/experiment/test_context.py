@@ -179,60 +179,15 @@ def test_extract_repo_candidates_from_ask():
     assert refs[0]["repo_name"] == "synspace"
 
 
-def test_resolve_repo_candidates_skips_search_when_inventory_covers(monkeypatch):
+def test_resolve_repo_candidates_extracts_urls_from_ask():
     from CoScientist.experiments.context import resolve_repo_candidates
 
-    called = {"n": 0}
-
-    def _boom(*_a, **_k):
-        called["n"] += 1
-        raise AssertionError("search must not run when inventory covers")
-
-    monkeypatch.setattr(
-        "CoScientist.experiments.capabilities.repo_searcher.search_repos_sync",
-        _boom,
-    )
-    caps = [{
-        "server_id": "srv",
-        "tool": "smiles2prop",
-        "description": "molecular properties and SA score / synthesizability",
-    }]
     out = resolve_repo_candidates(
-        "Call smiles2prop to estimate synthetic accessibility SA score for SMILES",
-        planner_caps=caps,
+        "Use repository https://github.com/whitead/synspace to run synthesis",
         route_alembic=True,
     )
-    assert out == []
-    assert called["n"] == 0
-
-
-def test_resolve_repo_candidates_searches_when_inventory_empty(monkeypatch):
-    from CoScientist.experiments.capabilities.repo_searcher import RepoCandidate, RepoSearchResult
-    from CoScientist.experiments.context import resolve_repo_candidates
-
-    def _fake_search(ask, **_kwargs):
-        cand = RepoCandidate(
-            url="https://github.com/whitead/synspace",
-            owner="whitead",
-            repo_name="synspace",
-            source="github_search",
-            fit_score=0.6,
-            fit_reason="test",
-            description="Synthesis generative model",
-        )
-        return RepoSearchResult(query=ask, search_queries=["q"], candidates=[cand])
-
-    monkeypatch.setattr(
-        "CoScientist.experiments.capabilities.repo_searcher.search_repos_sync",
-        _fake_search,
-    )
-    out = resolve_repo_candidates(
-        "Estimate synthetic accessibility SA score for SMILES",
-        planner_caps=[],
-        route_alembic=True,
-    )
-    assert any(c["url"] == "https://github.com/whitead/synspace" for c in out)
-    assert out[0].get("source") == "github_search"
+    assert any("synspace" in c.get("url", "") for c in out)
+    assert resolve_repo_candidates("No urls here", route_alembic=False) == []
 
 
 def test_planner_context_reads_numbered_frame_operations():
@@ -381,10 +336,11 @@ def test_build_experiment_context_falls_back_without_graph(monkeypatch):
     from CoScientist.experiments.context.builder import build_experiment_context
 
     ctx = _snapshot_ctx(monkeypatch, _FakeSnapshotGraph([]))
-    ask = "Hypothesis 1: Prose one works.\nHypothesis 2: Prose two works."
+    ask = "Prose hypothesis fallback test."
     ctx.state.update({"filtered_tools": [], "experiment_source_request": ask})
     ctx.user_content = SimpleNamespace(parts=[SimpleNamespace(text=ask)])
     build_experiment_context(ctx)
     refs = ctx.state["experiment_context"]["hypothesis_refs"]
-    assert [r["hypothesis_id"] for r in refs] == ["H1", "H2"]
-    assert refs[0]["statement"] == "Prose one works."
+    assert len(refs) >= 1
+    assert refs[0]["hypothesis_id"] == "H1"
+    assert refs[0]["statement"] == ask

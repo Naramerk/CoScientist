@@ -122,6 +122,14 @@ class DynamicMCPToolset(BaseToolset):
                 tools.extend(await ts.get_tools(readonly_context))
             except Exception as exc:  # noqa: BLE001 — skip a dead server, keep the rest
                 logger.warning("DynamicMCPToolset: %s unreachable: %s", url, exc)
+        allowed = {
+            str(item.get("tool") or item.get("name") or "").strip()
+            for item in (state.get("filtered_tools") or [])
+            if isinstance(item, dict)
+        }
+        allowed.discard("")
+        if allowed:
+            tools = [t for t in tools if getattr(t, "name", None) in allowed]
         return tools
 
     async def close(self) -> None:

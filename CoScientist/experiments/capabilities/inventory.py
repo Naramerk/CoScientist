@@ -12,8 +12,11 @@ They must not count as compute coverage for feasibility.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Iterable, Mapping
+
+_log = logging.getLogger(__name__)
 
 
 FAMILY_MCP = "mcp"
@@ -24,55 +27,40 @@ RESEARCH_SERVER_ID = "__research__"
 MEDICAL_SERVER_ID = "__medical__"
 _SYNTHETIC_SERVER_IDS = frozenset({RESEARCH_SERVER_ID, MEDICAL_SERVER_ID})
 
-# Tool names + purposes from CoScientist.assembly.bindings ToolDoc entries
-# for ResearchAgent / MedicalAgent. Coverage is still name/score bind, not
-# ask-phrase tables.
-_DECLARED_FAMILY_TOOLS: tuple[tuple[str, str, str, str], ...] = (
-    (FAMILY_RESEARCH, RESEARCH_SERVER_ID, "tavily_search",
-     "General web search."),
-    (FAMILY_RESEARCH, RESEARCH_SERVER_ID, "tavily_extract",
-     "Read the content of specific pages/URLs."),
-    (FAMILY_RESEARCH, RESEARCH_SERVER_ID, "tavily_crawl",
-     "Crawl a site starting from a URL when one page is not enough."),
-    (FAMILY_RESEARCH, RESEARCH_SERVER_ID, "explore_scientific_database",
-     "RAG search over an internal scientific literature database."),
-    (FAMILY_RESEARCH, RESEARCH_SERVER_ID, "explore_chemistry_database",
-     "RAG search over an internal scientific literature database."),
-    (FAMILY_RESEARCH, RESEARCH_SERVER_ID, "explore_my_papers",
-     "Answers questions using user-uploaded or previously downloaded papers."),
-    (FAMILY_RESEARCH, RESEARCH_SERVER_ID, "search_papers",
-     "Searches scientific papers in OpenAlex using metadata and search filters."),
-    (FAMILY_RESEARCH, RESEARCH_SERVER_ID, "download_papers_from_search",
-     "Searches and downloads papers for downstream analysis."),
-    (FAMILY_MEDICAL, MEDICAL_SERVER_ID, "search_pubmed",
-     "Find peer-reviewed literature on a clinical topic, drug, condition, or intervention."),
-    (FAMILY_MEDICAL, MEDICAL_SERVER_ID, "get_pico",
-     "Extract Population / Intervention / Comparison / Outcome from a paper abstract."),
-    (FAMILY_MEDICAL, MEDICAL_SERVER_ID, "get_study_taxonomy",
-     "Classify a paper's study design (observational vs experimental vs literature review)."),
-    (FAMILY_MEDICAL, MEDICAL_SERVER_ID, "analyze_medical_image",
-     "Interpret an uploaded DICOM or image file; differential diagnosis and ICD-10."),
-)
-
-
 def declared_family_capabilities(*families: str) -> list[dict[str, Any]]:
-    """Static research/medical tool descriptors for planner context."""
+    """Research/medical tool descriptors resolved from the assembly REGISTRY."""
     want = {str(item).strip() for item in families if str(item).strip()} or {
         FAMILY_RESEARCH, FAMILY_MEDICAL,
     }
     out: list[dict[str, Any]] = []
-    for family, server_id, tool, description in _DECLARED_FAMILY_TOOLS:
-        if family not in want:
-            continue
-        out.append({
-            "family": family,
-            "tool": tool,
-            "server_id": server_id,
-            "description": description,
-            "input_schema": {},
-            "score": None,
-            "url": None,
-        })
+
+    try:
+        from CoScientist.assembly.bindings import REGISTRY
+        family_to_registry_keys = {
+            FAMILY_RESEARCH: ("websearch", "paper_analysis", "papers_search"),
+            FAMILY_MEDICAL: ("medical",),
+        }
+        for family, keys in family_to_registry_keys.items():
+            if family not in want:
+                continue
+            server_id = RESEARCH_SERVER_ID if family == FAMILY_RESEARCH else MEDICAL_SERVER_ID
+            for key in keys:
+                entry = REGISTRY.get_tool(key)
+                if not entry or not entry.docs:
+                    continue
+                for doc in entry.docs:
+                    out.append({
+                        "family": family,
+                        "tool": doc.name,
+                        "server_id": server_id,
+                        "description": doc.purpose,
+                        "input_schema": {},
+                        "score": None,
+                        "url": None,
+                    })
+    except Exception as exc:
+        _log.warning("Failed to load declared family tools from REGISTRY: %s", exc)
+
     return out
 
 
@@ -191,6 +179,56 @@ def inventory_nonempty(available_tools: Iterable[dict[str, Any]] | Mapping[str, 
     return bool(index_inventory_tools(available_tools))
 
 
+def _schema_literals(spec: Any) -> set[str]:
+    """String enum/const literals from one JSON Schema node (incl. anyOf/items)."""
+    if not isinstance(spec, dict):
+        return set()
+    out: set[str] = set()
+    if isinstance(spec.get("enum"), list):
+        out.update(str(v).strip() for v in spec["enum"] if isinstance(v, str) and v.strip())
+    const = spec.get("const")
+    if isinstance(const, str) and const.strip():
+        out.add(const.strip())
+    items = spec.get("items")
+    if isinstance(items, dict):
+        out.update(_schema_literals(items))
+    for key in ("anyOf", "oneOf", "allOf"):
+        alts = spec.get(key)
+        if isinstance(alts, list):
+            for alt in alts:
+                out.update(_schema_literals(alt))
+    return out
+
+
+def schema_property_enums(schema: Any) -> dict[str, frozenset[str]]:
+    """Map property name → allowed string literals from JSON Schema enum/const."""
+    if not isinstance(schema, dict):
+        return {}
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return {}
+    out: dict[str, frozenset[str]] = {}
+    for name, spec in props.items():
+        lits = _schema_literals(spec)
+        if lits:
+            out[str(name)] = frozenset(lits)
+    return out
+
+
+def schema_property_defaults(schema: Any) -> dict[str, Any]:
+    """Map property name → JSON Schema default, when the schema declares one."""
+    if not isinstance(schema, dict):
+        return {}
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for name, spec in props.items():
+        if isinstance(spec, dict) and "default" in spec:
+            out[str(name)] = spec["default"]
+    return out
+
+
 def _named_match(text: str, by_tool: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
     if not text:
         return None
@@ -220,13 +258,6 @@ def match_named_inventory_tool(
         if hit := _named_match(request, by_tool):
             return hit
     return None
-
-
-def match_inventory_tool(
-    blob: str, by_tool: dict[str, dict[str, Any]], *, source_request: str = "",
-) -> dict[str, Any] | None:
-    """Match an inventory tool by exact name (alias to match_named_inventory_tool)."""
-    return match_named_inventory_tool(blob, by_tool, source_request=source_request)
 
 
 def match_named_family_capability(blob: str) -> dict[str, Any] | None:
@@ -295,7 +326,8 @@ __all__ = [
     "inventory_covers_capabilities",
     "inventory_nonempty",
     "inventory_pairs",
-    "match_inventory_tool",
     "match_named_family_capability",
     "match_named_inventory_tool",
+    "schema_property_defaults",
+    "schema_property_enums",
 ]

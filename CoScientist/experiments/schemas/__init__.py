@@ -3,7 +3,6 @@
 from CoScientist.experiments.reporting.models import (
     ArtifactRef,
     CriterionCheck,
-    ScientificCheck,
     TaskResult,
     artifact_name_from_location,
 )
@@ -48,7 +47,6 @@ __all__ = [
     "MCPServerRef",
     "MCPToolRef",
     "PlanCritique",
-    "ScientificCheck",
     "SuccessCriterion",
     "TaskDesign",
     "TaskResult",

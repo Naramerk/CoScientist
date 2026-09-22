@@ -18,6 +18,8 @@ from CoScientist.experiments.capabilities.inventory import (
     inventory_pairs,
     match_named_family_capability,
     match_named_inventory_tool,
+    schema_property_defaults,
+    schema_property_enums,
 )
 from CoScientist.experiments.critique.coverage import task_coverage_blob as _task_coverage_blob
 from CoScientist.experiments.schemas import (
@@ -31,33 +33,6 @@ from CoScientist.experiments.schemas import (
 _MCP = {ExecutionRoute.FEDOT_MAS, ExecutionRoute.REACT_TOOLS}
 _EVIDENCE_AGENTS = {ExecutionRoute.RESEARCH, ExecutionRoute.MEDICAL}
 _ALT = re.compile(r"\b(otherwise|else|либо|иначе|alternativ)\b|/", re.I)
-_NARRATIVE_REPORT = re.compile(
-    r"(?x)"
-    r"(synthesize|write|draft|compil\w*|подготов\w*|напиш\w*)\s+"
-    r".{0,40}(report|отчёт|вывод|findings)|"
-    r"(comprehensive|toxicological|final)\s+\w*\s*(report|synthesis)|"
-    r"отчёт\s+синтез|report\s+synthesis",
-    re.I,
-)
-_EXECUTION_ROUTES = {
-    ExecutionRoute.FEDOT_MAS,
-    ExecutionRoute.REACT_TOOLS,
-    ExecutionRoute.CODER,
-    ExecutionRoute.ALEMBIC_BUILD,
-}
-
-
-def _is_narrative_report_task(task: Any) -> bool:
-    blob = " ".join(
-        str(getattr(task, field, "") or "")
-        for field in ("name", "description")
-    )
-    design = getattr(task, "design", None)
-    if design is not None:
-        blob = f"{blob} {getattr(design, 'experiment_question', '') or ''}"
-    if not _NARRATIVE_REPORT.search(blob):
-        return False
-    return getattr(task, "route", None) in _EXECUTION_ROUTES
 
 
 class PlanValidationError(ValueError):
@@ -66,10 +41,24 @@ class PlanValidationError(ValueError):
         self.errors = errors or []
 
 
-def _issue(n: int, *, category: str, severity: str, message: str, suggestion: str, task_id: str | None = None) -> CritiqueIssue:
+def _issue(
+    n: int,
+    *,
+    category: str,
+    severity: str,
+    message: str,
+    suggestion: str,
+    task_id: str | None = None,
+    code: str = "",
+) -> CritiqueIssue:
     return CritiqueIssue(
-        issue_id=f"DET-{n:03d}", category=category, severity=severity,
-        task_id=task_id, message=message, suggestion=suggestion,
+        issue_id=f"DET-{n:03d}",
+        code=code,
+        category=category,
+        severity=severity,
+        task_id=task_id,
+        message=message,
+        suggestion=suggestion,
     )
 
 
@@ -152,9 +141,8 @@ def _named_inventory_tools_missing(plan: ExperimentPlan, *, available_tools: Ite
     """Explicitly required inventory tools omitted from the plan."""
     request = plan.source_request.lower()
     planned = _planned_tools(plan)
-    by_name, named = {}, []
-    for tool, item in _iter_inventory(available_tools):
-        by_name[tool] = item
+    named = []
+    for tool, _item in _iter_inventory(available_tools):
         if re.search(rf"(?<![\w-]){re.escape(tool.lower())}(?![\w-])", request) and _explicit_tool_requirement(request, tool):
             named.append(tool)
     if not named:
@@ -233,6 +221,41 @@ def _placeholder_url_hits(text: str) -> list[str]:
     return hits
 
 
+def _number_in_text(value: int | float, text: str) -> bool:
+    """True when this number appears as its own token in text (3 does not match 30)."""
+    forms = {str(value)}
+    if isinstance(value, float) and value.is_integer():
+        forms.add(str(int(value)))
+    if isinstance(value, int):
+        forms.add(str(value))
+    for form in forms:
+        if re.search(rf"(?<![\d.]){re.escape(form)}(?![\d.])", text):
+            return True
+    return False
+
+
+def _same_number(value: Any, default: Any) -> bool:
+    if isinstance(value, bool) or isinstance(default, bool):
+        return False
+    if not isinstance(value, (int, float)) or not isinstance(default, (int, float)):
+        return False
+    return float(value) == float(default)
+
+
+def _param_is_grounded(value: Any, source_request: str, default: Any) -> bool:
+    """A launch param may repeat the request, a schema literal is checked separately, or a schema default."""
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        return _same_number(value, default) or _number_in_text(value, source_request)
+    if isinstance(value, str):
+        text = value.strip()
+        return not text or text in source_request
+    if isinstance(value, list):
+        return all(_param_is_grounded(item, source_request, None) for item in value)
+    return False
+
+
 def critique_plan(
     plan: ExperimentPlan,
     *,
@@ -257,11 +280,11 @@ def critique_plan(
     def add(**kw: Any) -> None:
         issues.append(_issue(len(issues) + 1, **kw))
 
-    def fe(tid: str, sev: str, msg: str, sug: str) -> None:
-        add(category="feasibility", severity=sev, task_id=tid, message=msg, suggestion=sug)
+    def fe(tid: str, sev: str, msg: str, sug: str, code: str = "") -> None:
+        add(category="feasibility", severity=sev, task_id=tid, message=msg, suggestion=sug, code=code)
 
-    def co(sev: str, msg: str, sug: str, tid: str | None = None) -> None:
-        add(category="completeness", severity=sev, task_id=tid, message=msg, suggestion=sug)
+    def co(sev: str, msg: str, sug: str, tid: str | None = None, code: str = "") -> None:
+        add(category="completeness", severity=sev, task_id=tid, message=msg, suggestion=sug, code=code)
 
     for scope, text in _iter_plan_url_strings(plan):
         if hits := _placeholder_url_hits(text):
@@ -295,8 +318,13 @@ def critique_plan(
     research_forbidden = (
         isinstance(pipeline_scope, dict) and pipeline_scope.get("research") is False
     )
-    enabled = {ExecutionRoute.REACT_TOOLS, ExecutionRoute.CODER,
-               ExecutionRoute.RESEARCH, ExecutionRoute.MEDICAL}
+    enabled = {
+        ExecutionRoute.REACT_TOOLS,
+        ExecutionRoute.CODER,
+        ExecutionRoute.RESEARCH,
+        ExecutionRoute.MEDICAL,
+        ExecutionRoute.DATASET_COLLECTOR,
+    }
     if settings.route_fedot:
         enabled.add(ExecutionRoute.FEDOT_MAS)
     if settings.route_alembic:
@@ -335,11 +363,30 @@ def critique_plan(
             any_c |= ids
             if not task.optional:
                 req |= ids
+        untestable: list[str] = []
         if ctx:
             if miss := [h for h in ctx if h not in req]:
-                co("major", f"Context hypothesis_refs uncovered by non-optional task design: {', '.join(miss)}.",
-                   "Link each leftover id on an existing required task via "
-                   "design.hypothesis_ref or also_tests.")
+                testable = []
+                if ops:
+                    for hid in miss:
+                        has_op = any(
+                            hid.lower() in str(op.get("statement") or "").lower()
+                            or hid.lower() in str(op.get("hypothesis_ref") or "").lower()
+                            for op in ops
+                        )
+                        if has_op:
+                            testable.append(hid)
+                        else:
+                            untestable.append(hid)
+                else:
+                    testable = list(miss)
+                if testable:
+                    co("major", f"Context hypothesis_refs uncovered by non-optional task design: {', '.join(testable)}.",
+                       "Link each leftover id on an existing required task via "
+                       "design.hypothesis_ref or also_tests.")
+                if untestable:
+                    co("minor", f"hypothesis_not_testable_at_this_stage: Context hypothesis_refs uncovered: {', '.join(untestable)}.",
+                       "Uncovered hypotheses with no direct method at this stage will be marked postponed.")
             if plan_h and (mp := [h for h in ctx if h not in plan_h]):
                 add(category="consistency", severity="major",
                     message=f"plan.hypotheses omits context hypothesis ids: {', '.join(mp)}.",
@@ -351,7 +398,8 @@ def critique_plan(
             co("major", "No hypothesis_refs in context and plan.hypotheses is empty.",
                "HypothesesAgent should populate hypothesis_refs; copy them "
                "into plan.hypotheses (or one H1 from source_request) and link tasks.")
-        if plan_h and (orphan := [h for h in plan_h if h not in any_c]):
+        untestable_set = set(untestable)
+        if plan_h and (orphan := [h for h in plan_h if h not in any_c and h not in untestable_set]):
             co("major", f"plan.hypotheses ids not linked from tasks: {', '.join(orphan)}.",
                "Each plan hypothesis must appear as design.hypothesis_ref (or also_tests) on ≥1 task.")
 
@@ -392,15 +440,6 @@ def critique_plan(
 
     for task in plan.tasks:
         tid = task.id
-        if _is_narrative_report_task(task):
-            fe(
-                tid, "major",
-                f"{tid} is a narrative report/synthesis task — that is ResultAggregator, "
-                "not start_task(coder|fedot|alembic).",
-                "Drop this task. Compute tasks already produce artifacts; "
-                "the post-stage aggregator writes the report.",
-            )
-            continue
         if task.route == ExecutionRoute.ALEMBIC_BUILD:
             if not settings.route_alembic:
                 fe(tid, "blocker", "Route 'alembic_build' is disabled by profile settings.",
@@ -478,9 +517,25 @@ def critique_plan(
                    "Set design.analysis_artifacts.path_or_tool to an exact "
                    "available_research_capabilities / available_medical_capabilities name.")
 
+        if task.route == ExecutionRoute.DATASET_COLLECTOR:
+            if task.mcp_servers:
+                fe(
+                    tid, "blocker",
+                    f"{tid} uses dataset_collector but lists mcp_servers; "
+                    "DatasetCollectorAgent uses internal sandbox tools and APIs.",
+                    "Set mcp_servers to [].",
+                )
+            if not any(art.required for art in task.expected_artifacts):
+                fe(
+                    tid, "major",
+                    f"{tid} uses dataset_collector without a required data artifact.",
+                    "Require at least one dataset artifact (role=data, e.g. dataset.csv).",
+                )
+
         if task.route == ExecutionRoute.CODER and task.mcp_servers and not settings.route_coder_mcp:
             fe(tid, "major", "Direct MCP-to-Coder mode is disabled.",
-               "Remove MCP refs from the coder task or enable EXPERIMENTS__ROUTE_CODER_MCP.")
+               "Remove MCP refs from the coder task or enable EXPERIMENTS__ROUTE_CODER_MCP.",
+               code="direct_mcp_coder_disabled")
 
         if task.route == ExecutionRoute.CODER and not task.optional:
             blob = _task_coverage_blob(task, ops_index)
@@ -491,13 +546,15 @@ def critique_plan(
                     "family tool — Coder must not reimplement that family.",
                     "Set route=research or route=medical and bind the family tool on "
                     "design.analysis_artifacts.path_or_tool.",
+                    code="coder_reimplements_family",
                 )
             elif by_tool_caps and match_named_inventory_tool(blob, by_tool_caps):
-                fe(
-                    tid, "major",
-                    f"{tid} uses route=coder, but THIS task names a retrieved inventory "
-                    "tool — Coder must not reimplement a ready MCP.",
-                    "Bind that exact inventory tool on fedot_mas/react_tools.",
+                co(
+                    "minor",
+                    f"{tid} uses route=coder, and mentions a retrieved inventory tool.",
+                    "Consider binding that inventory tool on fedot_mas/react_tools if custom code is not required.",
+                    tid,
+                    code="coder_reimplements_inventory",
                 )
 
         if task.route == ExecutionRoute.CODER and settings.route_alembic and cand_list and not inventory_nonempty(by_tool_caps):
@@ -508,7 +565,8 @@ def critique_plan(
                "may be a better fit than reimplementing via coder.",
                f"Consider route=alembic_build with repo_url={top!r} and "
                "post_build_route=fedot_mas (or react_tools) instead of reimplementing via coder.",
-               tid)
+               tid,
+               code="coder_prefer_alembic")
 
         for server in task.mcp_servers:
             if server.source == "registry":
@@ -517,7 +575,42 @@ def critique_plan(
                         fe(tid, "blocker",
                            f"Registry tool {tool.name!r} on server {server.server_id!r} "
                            "is absent from the capability inventory.",
-                           "Use an exact retrieved tool/server pair, or switch to coder.")
+                           "Use an exact retrieved tool/server pair, or switch to coder.",
+                           code="inventory_tool_absent")
+                    elif tool.name in by_tool_caps and task.launch_params:
+                        t_item = by_tool_caps[tool.name]
+                        schema = t_item.get("input_schema")
+                        t_enums = schema_property_enums(schema)
+                        defaults = schema_property_defaults(schema)
+                        params = task.launch_params
+                        if isinstance(params, str):
+                            try:
+                                params = json.loads(params)
+                            except (TypeError, ValueError):
+                                params = None
+                        if isinstance(params, dict):
+                            source = plan.source_request or ""
+                            for p_name, val in params.items():
+                                allowed = t_enums.get(p_name)
+                                if allowed and isinstance(val, str) and val.strip():
+                                    if not any(val.strip().lower() == lit.lower() for lit in allowed):
+                                        fe(
+                                            tid, "major",
+                                            f"Task {tid} parameter {p_name}={val!r} is not in allowed choices for tool {tool.name!r}: {sorted(allowed)}.",
+                                            f"Use one of {sorted(allowed)} or omit {p_name}.",
+                                            code="invalid_tool_param_enum",
+                                        )
+                                    continue
+                                if _param_is_grounded(val, source, defaults.get(p_name)):
+                                    continue
+                                fe(
+                                    tid, "major",
+                                    f"Task {tid} parameter {p_name}={val!r} is not in the request or the tool schema.",
+                                    "Omit it. Copy a value that already appears in source_request, "
+                                    "use a schema enum/const or schema default, or bind the input "
+                                    "from an upstream task_artifact via depends_on and input_data.",
+                                    code="invented_launch_param",
+                                )
 
         if task.route in _MCP and "image/" not in _tool_output_blob(task):
             for art in task.expected_artifacts:
@@ -526,7 +619,41 @@ def critique_plan(
                        f"Required artifact {art.name!r} is an image/plot "
                        "(role=plot or image/* media_type), but selected MCP tools do not "
                        "document image/* outputs.",
-                       "Prefer required=false for viz extras; keep a required role=data artifact.")
+                       "Prefer required=false for viz extras; keep a required role=data artifact.",
+                       code="mcp_missing_image_output")
+
+        if getattr(settings, "evidence_strict", True) and task.route in (_MCP | {ExecutionRoute.CODER}) and not task.optional:
+            req_crits = [c for c in task.success_criteria if c.required]
+            if req_crits and all(str(c.kind) in ("artifact_exists", "execution") for c in req_crits):
+                fe(
+                    tid, "major",
+                    f"Compute task {tid} has only execution/artifact_exists criteria; at least one threshold criterion is required.",
+                    "Add a success_criteria item with kind='threshold', metric, operator, and target.",
+                    code="only_execution_criteria",
+                )
+            if task.design.metrics:
+                crit_metrics = {str(c.metric or "").strip().lower() for c in task.success_criteria if c.metric}
+                design_metric_names = {str(m.name or "").strip().lower() for m in task.design.metrics if m.name}
+                if not (crit_metrics & design_metric_names):
+                    fe(
+                        tid, "major",
+                        f"Task {tid} declares design.metrics ({', '.join(sorted(design_metric_names))}), but no success_criteria references them.",
+                        "Add a threshold criterion referencing one of the design.metrics.",
+                        code="metrics_not_in_criteria",
+                    )
+
+        bound_tool_names = [tool.name for server in task.mcp_servers for tool in server.tools if tool.name]
+        if len(bound_tool_names) > 1 and not task.optional:
+            exp_art_names = " ".join(
+                str(a.name or "") + " " + str(a.description or "") for a in task.expected_artifacts
+            ).lower()
+            missing_tool_arts = [t for t in bound_tool_names if t.lower() not in exp_art_names]
+            if missing_tool_arts:
+                fe(
+                    tid, "major",
+                    f"Composite task {tid} binds multiple tools ({', '.join(bound_tool_names)}), but lacks expected_artifacts for: {', '.join(missing_tool_arts)}.",
+                    "Add an expected_artifact for each bound tool in the composite step.",
+                )
 
     has_mcp = any(t.route in _MCP for t in plan.tasks)
     has_evidence = any(t.route in _EVIDENCE_AGENTS for t in plan.tasks)
@@ -596,19 +723,14 @@ def validate_and_critique_plan(
     **_kwargs: Any,
 ) -> tuple[ExperimentPlan, PlanCritique]:
     """Strict schema validation, then deterministic policy checks."""
-    from CoScientist.experiments.schemas.models import reset_lenient_planner, set_lenient_planner
-
     inventory = list(available_tools)
     repo_list = list(repo_candidates)
-    token = set_lenient_planner(settings.lenient_planner)
     try:
         plan = ExperimentPlan.model_validate(payload)
     except ValidationError as exc:
         raise PlanValidationError(
             "ExperimentPlan schema validation failed", errors=exc.errors(include_url=False)
         ) from exc
-    finally:
-        reset_lenient_planner(token)
     return plan, critique_plan(
         plan, settings=settings, available_tools=inventory,
         preferred_tools=None if preferred_tools is None else list(preferred_tools),

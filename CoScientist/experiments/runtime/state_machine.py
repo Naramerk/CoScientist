@@ -5,6 +5,7 @@ import copy
 import functools
 import logging
 import os
+import re
 from datetime import timedelta
 from typing import Any, Callable, Mapping, MutableMapping
 from uuid import uuid4
@@ -86,13 +87,32 @@ def _result_text_blob(result: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def fabrication_signals(result: dict[str, Any]) -> list[str]:
-    """Matched fabrication/simulation markers in a record_result payload."""
+def fabrication_signals(
+    result: dict[str, Any],
+) -> list[str]:
+    """Matched fabrication/simulation markers in a record_result payload.
+
+    Excludes negated assertions like 'data was not simulated' or 'no hardcoded data'.
+    """
     blob = _result_text_blob(result)
-    return sorted({m.group(0).lower() for m in FABRICATION_MARKERS.finditer(blob)})
+    matches = {m.group(0).lower() for m in FABRICATION_MARKERS.finditer(blob)}
+    if not matches:
+        return []
+
+    # Filter out false positives where negation words precede the match (e.g. "not simulated", "no hardcoded")
+    real_hits = []
+    for hit in matches:
+        negation_pattern = rf"(?i)\b(?:not|no|never|neither|without|prevent|avoid)\s+(?:\w+\s+)?{re.escape(hit)}\b"
+        if re.search(negation_pattern, blob):
+            continue
+        real_hits.append(hit)
+
+    return sorted(real_hits)
 
 
-def _downgrade_fabricated_success(result: dict[str, Any]) -> dict[str, Any]:
+def _downgrade_fabricated_success(
+    result: dict[str, Any],
+) -> dict[str, Any]:
     """Force success→partial when the agent admits simulated/fabricated evidence."""
     if result.get("status") != "success":
         return result
@@ -163,6 +183,7 @@ ROUTE_AGENT_BY_ROUTE = {
     ExecutionRoute.ALEMBIC_BUILD.value: "McpBuilderAgent",
     ExecutionRoute.RESEARCH.value: "ResearchAgent",
     ExecutionRoute.MEDICAL.value: "MedicalAgent",
+    ExecutionRoute.DATASET_COLLECTOR.value: "DatasetCollectorAgent",
 }
 # Defaults; prefer resolve_fallback_chains(settings) so EXPERIMENTS__FALLBACK_* apply.
 FALLBACK_CHAINS = {
@@ -176,6 +197,10 @@ FALLBACK_CHAINS = {
     ExecutionRoute.ALEMBIC_BUILD.value: [ExecutionRoute.ALEMBIC_BUILD.value, ExecutionRoute.CODER.value],
     ExecutionRoute.RESEARCH.value: [ExecutionRoute.RESEARCH.value],
     ExecutionRoute.MEDICAL.value: [ExecutionRoute.MEDICAL.value],
+    ExecutionRoute.DATASET_COLLECTOR.value: [
+        ExecutionRoute.DATASET_COLLECTOR.value,
+        ExecutionRoute.CODER.value,
+    ],
 }
 
 
@@ -193,6 +218,9 @@ def resolve_fallback_chains(settings: ExperimentsSettings | None = None) -> dict
         ExecutionRoute.ALEMBIC_BUILD.value: list(cfg.fallback_alembic_build),
         ExecutionRoute.RESEARCH.value: list(cfg.fallback_research),
         ExecutionRoute.MEDICAL.value: list(cfg.fallback_medical),
+        ExecutionRoute.DATASET_COLLECTOR.value: list(
+            getattr(cfg, "fallback_dataset_collector", ["dataset_collector", "coder"])
+        ),
     }
 
 
@@ -424,6 +452,7 @@ def _route_timeout(settings: ExperimentsSettings, route: str) -> float:
         ExecutionRoute.ALEMBIC_BUILD.value: settings.coder_timeout_s,
         ExecutionRoute.RESEARCH.value: settings.research_timeout_s,
         ExecutionRoute.MEDICAL.value: settings.medical_timeout_s,
+        ExecutionRoute.DATASET_COLLECTOR.value: getattr(settings, "dataset_collector_timeout_s", 3600.0),
     }[route]
 
 
@@ -437,6 +466,7 @@ def _route_enabled(route: str, settings: ExperimentsSettings) -> bool:
         ExecutionRoute.CODER.value,
         ExecutionRoute.RESEARCH.value,
         ExecutionRoute.MEDICAL.value,
+        ExecutionRoute.DATASET_COLLECTOR.value,
     }
 
 
@@ -519,15 +549,23 @@ def _resolve_inputs(
 def force_managed_s3_launch_params(launch_params: dict[str, Any] | None, *, require: bool) -> dict[str, Any]:
     """Ensure tools whose schema offers S3 upload persist a managed artifact."""
     params = copy.deepcopy(launch_params or {})
-    if require:
+    has_subdicts = any(isinstance(v, dict) for v in params.values())
+    if has_subdicts:
+        for k, v in list(params.items()):
+            if isinstance(v, dict):
+                params[k] = force_managed_s3_launch_params(v, require=require)
+    elif require:
         params["upload_results_to_s3"] = True
         params.setdefault("output_s3_prefix", "generated")
-    return clamp_generate_launch_num(params)
+    return clamp_numeric_params(params)
 
 
 def generate_num_cap() -> int:
-    """Max generator ``num`` from ``EXPERIMENTS__MAX_GENERATE_NUM`` (0 = off)."""
-    raw = os.getenv("EXPERIMENTS__MAX_GENERATE_NUM", "").strip()
+    """Max generator/numerical cap from ``EXPERIMENTS__MAX_GENERATE_NUM`` or ``EXPERIMENTS__MAX_NUMERIC_PARAM`` (0 = off)."""
+    raw = (
+        os.getenv("EXPERIMENTS__MAX_GENERATE_NUM", "").strip()
+        or os.getenv("EXPERIMENTS__MAX_NUMERIC_PARAM", "").strip()
+    )
     if not raw:
         return 0
     try:
@@ -536,19 +574,49 @@ def generate_num_cap() -> int:
         return 0
 
 
-def clamp_generate_launch_num(launch_params: dict[str, Any] | None) -> dict[str, Any]:
-    """Cap or fill ``num`` so Fedot cannot request 100 CVAE molecules."""
+def clamp_numeric_params(
+    launch_params: dict[str, Any] | None,
+    *,
+    tool_schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Cap numerical request parameters so tool calls do not exceed configured limits or schema maximums."""
     params = copy.deepcopy(launch_params or {})
     cap = generate_num_cap()
+
+    # 1. Enforce schema maximum constraints if tool_schema is provided
+    if isinstance(tool_schema, dict):
+        props = tool_schema.get("properties")
+        if isinstance(props, dict):
+            for k, prop_spec in props.items():
+                if not isinstance(prop_spec, dict):
+                    continue
+                schema_max = prop_spec.get("maximum")
+                if schema_max is not None and k in params:
+                    try:
+                        val = float(params[k])
+                        if val > float(schema_max):
+                            params[k] = type(params[k])(schema_max)
+                    except (TypeError, ValueError):
+                        pass
+
     if cap <= 0:
         return params
-    current = params.get("num")
-    try:
-        n = int(current) if current is not None else cap
-    except (TypeError, ValueError):
-        n = cap
-    params["num"] = min(n, cap)
+
+    for k, v in list(params.items()):
+        if isinstance(v, dict):
+            params[k] = clamp_numeric_params(v, tool_schema=tool_schema)
+        elif k.lower() in {"num", "n_samples", "num_samples", "num_results", "count", "limit", "n"}:
+            try:
+                n = int(v)
+                params[k] = min(n, cap)
+            except (TypeError, ValueError):
+                params[k] = cap
+
     return params
+
+
+# Backward-compatible alias
+clamp_generate_launch_num = clamp_numeric_params
 
 
 def _scope_tools(task: ExperimentTask) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -579,6 +647,8 @@ def start_task(
     state: MutableMapping[str, Any],
     task_id: str,
     *,
+    attempt_no: int | None = None,
+    route: str | None = None,
     settings: ExperimentsSettings | None = None,
     presign: Callable[[str, str, int], str] = generate_presigned_s3_url,
 ) -> dict[str, Any]:
@@ -667,7 +737,7 @@ def start_task(
     if task_requires_managed_s3(task_model):
         launch_params = force_managed_s3_launch_params(launch_params, require=True)
     else:
-        launch_params = clamp_generate_launch_num(launch_params)
+        launch_params = clamp_numeric_params(launch_params)
     if launch_params != (task_model.launch_params or {}):
         task_model = task_model.model_copy(update={"launch_params": launch_params})
         task_runtime["task"] = task_model.model_dump(mode="json")
@@ -677,11 +747,11 @@ def start_task(
     filtered_tools, deployed_mcps = _scope_tools(task_model)
     if route == ExecutionRoute.CODER.value and not cfg.route_coder_mcp:
         filtered_tools, deployed_mcps = [], []
-    if route in {ExecutionRoute.RESEARCH.value, ExecutionRoute.MEDICAL.value}:
+    if route in {ExecutionRoute.RESEARCH.value, ExecutionRoute.MEDICAL.value, ExecutionRoute.DATASET_COLLECTOR.value}:
         filtered_tools, deployed_mcps = [], []
     try:
         resolved_inputs = _resolve_inputs(runtime, task_model, route=route, settings=cfg, presign=presign)
-        if route == ExecutionRoute.CODER.value and not resolved_inputs and task_model.depends_on:
+        if route in {ExecutionRoute.CODER.value, ExecutionRoute.DATASET_COLLECTOR.value} and not resolved_inputs and task_model.depends_on:
             from CoScientist.experiments.schemas import DataRef
             synthetic: list[Any] = []
             for dep in task_model.depends_on:
@@ -717,7 +787,7 @@ def start_task(
     upstream_bindings = seed_upstream_from_resolved_inputs(
         state, resolved_inputs, filtered_tools
     )
-    if route == ExecutionRoute.CODER.value:
+    if route in {ExecutionRoute.CODER.value, ExecutionRoute.DATASET_COLLECTOR.value}:
         from CoScientist.experiments.runtime.coder_artifacts import seed_coder_upstream_inputs
         try:
             seed_coder_upstream_inputs(state, resolved_inputs)
@@ -886,6 +956,22 @@ def record_result(
     raw_artifacts = captured_delta(state, attempt)
     raw_artifacts.extend(copy.deepcopy(item) for item in (result.get("artifacts") or []) if isinstance(item, dict))
     outputs = result.get("outputs") or {}
+    expected_names = [item.name for item in task.expected_artifacts if item.name]
+    if isinstance(outputs, dict) and outputs:
+        from CoScientist.experiments.runtime.evidence import scan_placeholder_outputs
+        dropped_keys = scan_placeholder_outputs(outputs, expected_names=expected_names)
+        if dropped_keys:
+            outputs = {k: v for k, v in outputs.items() if k not in dropped_keys}
+            result["outputs"] = outputs
+            warnings_list = list(result.get("warnings") or [])
+            warnings_list.append(f"placeholder_outputs_dropped:{','.join(sorted(dropped_keys))}")
+            result["warnings"] = warnings_list
+        if status in {"success", "partial"} and not outputs and not raw_artifacts:
+            status = "failure"
+            result["status"] = "failure"
+            result["error_code"] = "placeholder_only_outputs"
+            result["error_message"] = "Outputs contained only placeholders and no durable artifacts exist."
+
     if isinstance(outputs, dict) and outputs:
         from CoScientist.experiments.runtime.inline_artifacts import materialize_outputs_as_artifacts
         raw_artifacts.extend(
@@ -908,14 +994,33 @@ def record_result(
         )
 
     artifacts, artifact_warnings = normalise_artifacts(raw_artifacts, runtime=runtime, task_runtime=task_runtime, attempt=attempt)
+    strict_evidence = getattr(cfg, "evidence_strict", False)
+    if strict_evidence:
+        from CoScientist.experiments.runtime.evidence import (
+            bind_criteria_evidence,
+            verify_threshold_criteria,
+        )
+        checks = bind_criteria_evidence(task, checks, artifacts)
+        checks = verify_threshold_criteria(task, checks, artifacts)
+        result = {**result, "criteria_checks": [c.model_dump(mode="json") for c in checks]}
+
     artifacts_ok, missing_artifacts = required_artifacts_present(task, artifacts, route=attempt_route)
-    criteria_ok, failed_criteria = criteria_valid(task, checks, route=attempt_route)
+    criteria_ok, failed_criteria = criteria_valid(
+        task, checks, route=attempt_route,
+        evidence_strict=strict_evidence and status in {"success", "partial"},
+    )
     durable_ok = has_durable_family_evidence(
         task, artifacts, route=attempt_route,
         outputs=outputs if isinstance(outputs, dict) else {},
     )
     if durable_ok:
-        checks = attest_durable_criteria(task, checks)
+        checks = attest_durable_criteria(
+            task, checks,
+            artifacts=artifacts if strict_evidence else None,
+        )
+        if strict_evidence:
+            from CoScientist.experiments.runtime.evidence import verify_threshold_criteria
+            checks = verify_threshold_criteria(task, checks, artifacts)
         result = {**result, "criteria_checks": [c.model_dump(mode="json") for c in checks]}
         if not artifacts_ok:
             artifacts_ok, missing_artifacts = True, []
@@ -923,7 +1028,10 @@ def record_result(
                 "accepted_via_durable_family_evidence: S3/file/mcp_url present; "
                 "planner artifact names are not required."
             )
-        criteria_ok, failed_criteria = criteria_valid(task, checks, route=attempt_route)
+        criteria_ok, failed_criteria = criteria_valid(
+            task, checks, route=attempt_route,
+            evidence_strict=strict_evidence and status in {"success", "partial"},
+        )
         if status == "failure" and criteria_ok and artifacts_ok:
             # Ярлык оправдан: доказательство действительно есть, и называть это
             # полным провалом неверно. Но retryable=False здесь был отдельной,
@@ -1211,9 +1319,10 @@ def skip_task(
     runtime = _runtime(state)
     task_runtime = _task(runtime, task_id)
     task = ExperimentTask.model_validate(task_runtime["task"])
-    if not task.optional:
+    has_prior_attempts = bool(task_runtime.get("attempts"))
+    if not task.optional and not has_prior_attempts and task_runtime["status"] not in {"failed", "fallback_pending", "retry_pending"}:
         raise ExperimentRuntimeError("skip_required", "Only optional v0 tasks may be skipped without human amendment.")
-    if task_runtime["status"] not in {"pending", "ready"}:
+    if task_runtime["status"] not in {"pending", "ready", "failed", "fallback_pending", "retry_pending"}:
         raise ExperimentRuntimeError("skip_not_allowed", f"Cannot skip task in {task_runtime['status']!r} state.")
     return _complete_as_skipped(state, task_id, reason)
 
@@ -1319,6 +1428,7 @@ __all__ = [
     "approve_plan",
     "fallback_task",
     "clamp_generate_launch_num",
+    "clamp_numeric_params",
     "force_managed_s3_launch_params",
     "generate_num_cap",
     "generate_presigned_s3_url",

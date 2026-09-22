@@ -17,9 +17,44 @@ from CoScientist.experiments.capabilities.inventory import get_grouped_mcp_inven
 from CoScientist.experiments.runtime.shared import audit
 
 logger = logging.getLogger(__name__)
+
+
+def _cfg():
+    try:
+        from CoScientist.config import get_settings
+        return get_settings().experiments
+    except Exception:
+        return None
+
+
+def max_retrieval_calls() -> int:
+    cfg = _cfg()
+    return getattr(cfg, "max_retrieval_calls", 5) if cfg else 5
+
+
+def desc_limit() -> int:
+    cfg = _cfg()
+    return getattr(cfg, "desc_limit", 600) if cfg else 600
+
+
+def prompt_desc_limit() -> int:
+    cfg = _cfg()
+    return getattr(cfg, "prompt_desc_limit", 450) if cfg else 450
+
+
+def max_hypothesis_refs() -> int:
+    cfg = _cfg()
+    return getattr(cfg, "max_hypothesis_refs", 8) if cfg else 8
+
+
+def max_repo_candidates() -> int:
+    cfg = _cfg()
+    return getattr(cfg, "max_repo_candidates", 8) if cfg else 8
+
+
 _MAX_RETRIEVAL_CALLS = 5
-_DESC_LIMIT = 400
-_PROMPT_DESC_LIMIT = 220
+_DESC_LIMIT = 600
+_PROMPT_DESC_LIMIT = 450
 _CLEAR_ON_NEW_RUN = (
     "experiment_plan", "experiment_runtime", "experiment_task_results", "experiment_summary",
     "experiment_artifacts_manifest",
@@ -33,30 +68,11 @@ _CLEAR_ON_NEW_RUN = (
 DISCOVERED_CAPABILITIES_KEY = "experiment_discovered_capabilities"  # survives attempt clears
 RETRIEVED_CAPABILITIES_KEY = "experiment_retrieved_capabilities"  # pre-rerank full set
 PLANNER_CONTEXT_KEY = "experiment_planner_context"  # compact JSON for planner instruction
-_H_LABEL_RE = re.compile(  # explicit H1/H2/… (domain-agnostic)
-    r"(?:^|[\n\r•\-\*\u2022]\s*|(?<=\s))"
-    r"(?P<id>H\d+)\s*[.:)\u2013\u2014\-]\s*(?P<statement>\S.*?)"
-    r"(?=(?:\n\s*(?:H\d+\s*[.:)\u2013\u2014\-]|\u2022|•|\-|\*)|\Z))",
-    re.IGNORECASE | re.DOTALL,
-)
-# System HypothesesAgent prose: "Hypothesis 1 (Parkinson's):" / "**Hypothesis 2:**"
-_HYPOTHESIS_N_RE = re.compile(
-    r"(?:^|[\n\r])\s*(?:\*\*)?Hypothesis\s*(?P<num>\d+)\s*"
-    r"(?:\([^)]*\))?\s*(?:\*\*)?\s*[.:)\u2013\u2014\-]\s*"
-    r"(?P<body>.+?)"
-    r"(?=(?:\n\s*(?:\*\*)?Hypothesis\s*\d+|\n\s*H\d+\s*[.:)\u2013\u2014\-]|\Z))",
-    re.IGNORECASE | re.DOTALL,
-)
-_STATEMENT_IN_BODY_RE = re.compile(
-    r"(?:\*\*)?Statement(?:\*\*)?\s*:\s*(?P<statement>.+?)"
-    r"(?=\n\s*(?:\*\*)?(?:VerificationMethod|ConfirmationCriteria|Hypothesis\s*\d+|H\d+\s*[.:)]|\*)|\Z)",
-    re.IGNORECASE | re.DOTALL,
-)
 _MAX_HYPOTHESIS_REFS = 8
 _MAX_REPO_CANDIDATES = 8
 _REPO_URL_RE = re.compile(
-    r"(?P<url>https?://(?:www\.)?(?:github\.com|gitlab\.com|bitbucket\.org)/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+"
-    r"|git@(?:github\.com|gitlab\.com|bitbucket\.org):[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+(?:\.git)?)",
+    r"(?P<url>https?://(?:www\.)?(?:github\.com|gitlab\.com|bitbucket\.org)/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+(?:\.git)?)"
+    r"|git@(?:github\.com|gitlab\.com|bitbucket\.org):[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+(?:\.git)?",
     re.IGNORECASE,
 )
 _PROMPT_OPTIONAL_KEYS = (
@@ -100,7 +116,8 @@ def enforce_experiment_retrieval_budget(
     state = callback_context.state
     baseline = int(state.get("experiment_retrieval_query_baseline") or 0)
     calls_used = max(0, len(state.get("retrieval_queries") or []) - baseline)
-    remaining = max(0, _MAX_RETRIEVAL_CALLS - calls_used)
+    limit_calls = max_retrieval_calls()
+    remaining = max(0, limit_calls - calls_used)
     if len(call_parts) <= remaining:
         return None
     if remaining:
@@ -117,7 +134,7 @@ def enforce_experiment_retrieval_budget(
         )
     state["experiment_retrieval_budget_exhausted"] = True
     marker = (
-        f"EXPERIMENT_RETRIEVAL_BUDGET_EXHAUSTED calls={_MAX_RETRIEVAL_CALLS}. "
+        f"EXPERIMENT_RETRIEVAL_BUDGET_EXHAUSTED calls={limit_calls}. "
         "Capability discovery is complete; use the accumulated exact tool metadata and end this retrieval stage."
     )
     audit(logger, marker, level=logging.WARNING)
@@ -181,7 +198,7 @@ def research_graph_snapshot(callback_context: CallbackContext) -> dict[str, Any]
             if status not in _SNAPSHOT_ACTIVE_H_STATUSES:
                 continue
             statement = str(attrs.get("formulation") or attrs.get("label") or "").strip()
-            if not statement or len(hypothesis_refs) >= _MAX_HYPOTHESIS_REFS:
+            if not statement or len(hypothesis_refs) >= max_hypothesis_refs():
                 continue
             hid = str(node.get("id") or "").strip().upper()
             if not re.fullmatch(r"H\d+", hid):
@@ -195,7 +212,7 @@ def research_graph_snapshot(callback_context: CallbackContext) -> dict[str, Any]
                 constraints.append({
                     "kind": "constraint",
                     "subtype": str(attrs.get("subtype") or ""),
-                    "content": content[:_DESC_LIMIT],
+                    "content": content[:desc_limit()],
                 })
         elif ntype == "ConfirmationCriteria":
             row = {k: v for k, v in attrs.items() if v not in (None, "", [], {})}
@@ -223,6 +240,7 @@ def research_graph_snapshot(callback_context: CallbackContext) -> dict[str, Any]
             })
     snapshot = {
         "hypothesis_refs": hypothesis_refs[:_MAX_HYPOTHESIS_REFS],
+        "hypotheses": hypothesis_refs[:_MAX_HYPOTHESIS_REFS],
         "constraints": constraints[:20],
         "confirmation_criteria": criteria[:8],
         "data_refs": data_refs[:20],
@@ -379,128 +397,69 @@ def resolve_repo_candidates(
     search_limit: int = 5,
     operations: Iterable[Any] = (),
 ) -> list[dict[str, Any]]:
-    """Ask URLs + optional GitHub search when Alembic is on and inventory is empty.
-
-    ``search=None`` → search when there are no this-run compute tools, or when
-    there are no frame operations and the ask does not name an inventory tool.
-    Pass ``search=False`` in unit tests to skip the network.
-    """
+    """Ask URLs when Alembic is on; discovery belongs to ResearchAgent / CoderAgent as in system.yaml."""
     if not route_alembic:
         return []
     from_ask = extract_repo_candidates(source_request)
-    caps = list(planner_caps or [])
-    do_search = (
-        (not _inventory_covers_ask(caps, source_request, operations))
-        if search is None else bool(search)
-    )
-    if not do_search:
-        return from_ask[:_MAX_REPO_CANDIDATES]
-
     if cached:
-        merged = _merge_repo_candidates(from_ask, list(cached))
-        if len(merged) >= min(search_limit, _MAX_REPO_CANDIDATES):
-            return merged[:_MAX_REPO_CANDIDATES]
+        return _merge_repo_candidates(from_ask, list(cached))[:_MAX_REPO_CANDIDATES]
+    return from_ask[:_MAX_REPO_CANDIDATES]
 
-    from CoScientist.experiments.capabilities.repo_searcher import search_repos_sync
+def _is_tool_prep_noise(text: str) -> bool:
+    blob = (text or "").strip()
+    if not blob:
+        return True
+    noise_markers = (
+        "mcp_scores",
+        "[FullSetToolReranker]",
+        "[ToolReranker]",
+        "[ToolRetrieverAgent]",
+        "[WebToolsDeployerAgent]",
+        "EXPERIMENT_RETRIEVAL_BUDGET",
+    )
+    if any(m in blob for m in noise_markers):
+        return True
+    return bool(blob.startswith("{") and "mcp_scores" in blob)
 
-    found: list[dict[str, Any]] = []
-    try:
-        result = search_repos_sync(source_request, limit=search_limit)
-        found = [c.to_context_item() for c in result.candidates]
-        if result.errors:
-            audit(
-                logger,
-                f"EXPERIMENT_REPO_SEARCH_ERRORS n={len(result.errors)} "
-                f"sample={result.errors[0][:160]}",
-                level=logging.WARNING,
-            )
-        audit(
-            logger,
-            f"EXPERIMENT_REPO_SEARCH hit={len(found)} raw={result.total_raw} "
-            f"queries={result.search_queries}",
-            stdout=(
-                f"EXPERIMENT_REPO_SEARCH hit={len(found)} "
-                f"urls={[c.get('url') for c in found[:3]]}"
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("repo search failed: %s", exc)
-        audit(logger, f"EXPERIMENT_REPO_SEARCH_FAILED err={exc}", level=logging.WARNING)
 
-    return _merge_repo_candidates(from_ask, found, list(cached or []))[:_MAX_REPO_CANDIDATES]
-
-def _statement_from_hypothesis_body(body: str) -> str:
-    """Prefer *Statement:* from system-HypothesesAgent prose; else first content line."""
-    body = (body or "").strip()
-    if not body:
-        return ""
-    if m := _STATEMENT_IN_BODY_RE.search(body):
-        statement = re.sub(r"\s+", " ", m.group("statement")).strip()
-        return re.sub(r"^\*+\s*", "", statement).strip()
-    for line in body.splitlines():
-        text = re.sub(r"^\*+|\*+$", "", line.strip()).strip()
-        if not text:
-            continue
-        if re.match(r"(?i)^(verificationmethod|confirmationcriteria)\b", text):
-            break
-        if re.match(r"(?i)^statement\s*:", text):
-            return re.sub(r"(?i)^statement\s*:\s*", "", text).strip()
+def _resolve_em_ask(callback_context: CallbackContext) -> str:
+    state = callback_context.state
+    for key in ("experiment_source_request", "user_query", "query"):
+        val = state.get(key)
+        if isinstance(val, str) and val.strip() and not _is_tool_prep_noise(val):
+            return val.strip()
+    text = _user_text(callback_context)
+    if text and not _is_tool_prep_noise(text):
         return text
-    return re.sub(r"^\*+\s*", "", re.sub(r"\s+", " ", body).strip()).strip()
+    return ""
 
 
-def extract_hypothesis_refs(
-    source_request: str, *, legacy_hypotheses: Any = None, limit: int = _MAX_HYPOTHESIS_REFS,
-) -> list[dict[str, str]]:
-    """Merge explicit H* / Hypothesis-N labels with legacy session hypotheses."""
-    out: list[dict[str, str]] = []
-    seen: set[str] = set()
+def persist_experiment_em_request(callback_context: CallbackContext) -> None:
+    """before_agent on ToolRetriever: capture the original ask once; do not
+    overwrite it with hypothesis prose. A new orchestrator_root_goal clears leftover inventory."""
+    state = callback_context.state
+    root = str(state.get("orchestrator_root_goal") or "").strip()
+    ask = root if root and not _is_tool_prep_noise(root) else _resolve_em_ask(callback_context)
+    if not ask:
+        return
+    existing = str(state.get("experiment_source_request") or "").strip()
+    if existing == ask:
+        return
+    if existing and not _is_tool_prep_noise(existing):
+        if not (root and not _is_tool_prep_noise(root) and root != existing):
+            return
+        ask = root
+    _clear_leftover_inventory(state)
+    state["experiment_source_request"] = ask
+    state["_em_hypotheses_seeded"] = False
+    audit(logger, f"EXPERIMENT_EM_REQUEST_PERSISTED chars={len(ask)}")
 
-    def _add(hid: str, statement: str) -> None:
-        hid = str(hid or "").strip().upper()
-        statement = re.sub(r"\s+", " ", str(statement or "").strip())
-        if hid and statement and hid not in seen:
-            seen.add(hid)
-            out.append({"hypothesis_id": hid, "statement": statement[:800]})
 
-    if source_request:
-        for match in _H_LABEL_RE.finditer(source_request):
-            _add(match.group("id"), match.group("statement"))
-            if len(out) >= limit:
-                return out
-        # System HypothesesAgent style → normalize Hypothesis N → HN
-        for match in _HYPOTHESIS_N_RE.finditer(source_request):
-            statement = _statement_from_hypothesis_body(match.group("body"))
-            if statement:
-                _add(f"H{int(match.group('num'))}", statement)
-            if len(out) >= limit:
-                return out
-    for index, item in enumerate(legacy_hypotheses or []):
-        if len(out) >= limit:
-            break
-        if isinstance(item, str) and (text := item.strip()):
-            m = re.match(r"^(H\d+)\s*[.:)\-]\s*(.+)$", text, re.I | re.DOTALL)
-            if m:
-                _add(*m.groups())
-                continue
-            m_n = re.match(
-                r"^(?:\*\*)?Hypothesis\s*(\d+)\s*(?:\([^)]*\))?\s*(?:\*\*)?\s*[.:)\-]\s*(.+)$",
-                text,
-                re.I | re.DOTALL,
-            )
-            if m_n:
-                _add(f"H{int(m_n.group(1))}", _statement_from_hypothesis_body(m_n.group(2)))
-            else:
-                _add(f"H{index + 1}", text)
-        elif isinstance(item, dict):
-            hid = item.get("hypothesis_id") or item.get("id") or item.get("key")
-            statement = (
-                item.get("statement") or item.get("text")
-                or item.get("hypothesis") or item.get("content")
-            )
-            if statement:
-                _add(str(hid) if hid else f"H{index + 1}", str(statement))
-    return out[:limit]
+def _clear_leftover_inventory(state: Any) -> None:
+    """Drop retrieved tools from a prior ask so leftover MCP cannot fake cover."""
+    state[DISCOVERED_CAPABILITIES_KEY] = None
+    state[RETRIEVED_CAPABILITIES_KEY] = None
+    state["accumulated_tools"] = []
 
 def _bounded(value: Any, limit: int) -> Any:
     if isinstance(value, str):
@@ -512,7 +471,7 @@ def _bounded(value: Any, limit: int) -> Any:
     return copy.deepcopy(value)
 
 def _schema_brief(schema: Any) -> dict[str, Any]:
-    """Keep required + param names; drop nested prose."""
+    """Keep required + param names + string enums/consts; drop nested prose."""
     if not isinstance(schema, dict):
         return {}
     brief: dict[str, Any] = {}
@@ -521,6 +480,9 @@ def _schema_brief(schema: Any) -> dict[str, Any]:
     props = schema.get("properties")
     if isinstance(props, dict) and props:
         brief["params"] = list(props.keys())[:16]
+        from CoScientist.experiments.capabilities.inventory import schema_property_enums
+        if enums := schema_property_enums(schema):
+            brief["enums"] = {k: sorted(list(v))[:10] for k, v in enums.items()}
     return brief
 
 def _normalize_capabilities(items: Any) -> list[dict[str, Any]]:
@@ -813,9 +775,10 @@ def build_experiment_context(callback_context: CallbackContext) -> None:
         if isinstance(r, dict) and str(r.get("statement") or "").strip()
     ]
     hypothesis_refs = (
-        snapshot.get("hypothesis_refs")
+        snapshot.get("hypotheses")
+        or snapshot.get("hypothesis_refs")
         or published_refs
-        or extract_hypothesis_refs(source_request, legacy_hypotheses=state.get("hypotheses"))
+        or [{"hypothesis_id": "H1", "statement": source_request[:800]}]
     )
     session_data_refs = [
         r for r in (state.get("experiment_data_refs") or []) if isinstance(r, dict)
@@ -871,7 +834,8 @@ def build_experiment_context(callback_context: CallbackContext) -> None:
 __all__ = [
     "DISCOVERED_CAPABILITIES_KEY", "RETRIEVED_CAPABILITIES_KEY",
     "build_experiment_context", "enforce_experiment_retrieval_budget",
-    "extract_hypothesis_refs", "extract_repo_candidates",
+    "extract_repo_candidates",
+    "persist_experiment_em_request",
     "research_graph_snapshot",
     "resolve_repo_candidates",
     "reset_experiment_retrieval_budget",

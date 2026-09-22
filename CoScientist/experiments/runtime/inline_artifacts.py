@@ -12,6 +12,16 @@ from typing import Any, Mapping, MutableMapping
 from CoScientist.config import get_settings
 
 _FENCED_BLOCK = re.compile(r"```(?P<kind>[a-zA-Z0-9_-]*)\s*\n(?P<body>.*?)```", re.DOTALL)
+
+
+def _max_inline_bytes() -> int:
+    try:
+        cfg = get_settings().experiments
+        return getattr(cfg, "max_inline_bytes", 10_000_000)
+    except Exception:
+        return 10_000_000
+
+
 _MAX_INLINE_BYTES = 10_000_000
 _EXTENSIONS = {
     "text/csv": ".csv",
@@ -56,12 +66,20 @@ def _encode_payload(
     name: str,
     media_type: str | None,
 ) -> tuple[bytes, str] | None:
+    from CoScientist.experiments.runtime.evidence import is_placeholder_value
+    if is_placeholder_value(value):
+        return None
     if media_type == "text/csv" or name.lower().endswith(".csv"):
         text = _csv_payload(value)
-        return (text.encode("utf-8"), "text/csv") if text is not None else None
+        if text is None or is_placeholder_value(text):
+            return None
+        return (text.encode("utf-8"), "text/csv")
     try:
+        encoded = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        if is_placeholder_value(encoded):
+            return None
         return (
-            json.dumps(value, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+            encoded.encode("utf-8"),
             media_type or "application/json",
         )
     except (TypeError, ValueError):
@@ -108,7 +126,7 @@ def _write_artifact(
     producer_tool: str,
     state: MutableMapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    if not payload or len(payload) > _MAX_INLINE_BYTES:
+    if not payload or len(payload) > _max_inline_bytes():
         return None
     ext = "" if Path(name).suffix else _EXTENSIONS.get(media_type, ".json")
     folder = Path(get_settings().code_exec.workspace_root) / "experiment_artifacts" / str(task_id) / str(attempt_id)

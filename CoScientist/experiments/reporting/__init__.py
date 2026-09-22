@@ -3,7 +3,6 @@
 from .models import (
     ArtifactRef,
     CriterionCheck,
-    ScientificCheck,
     TaskResult,
     artifact_name_from_location,
 )
@@ -11,7 +10,6 @@ from .models import (
 __all__ = [
     "ArtifactRef",
     "CriterionCheck",
-    "ScientificCheck",
     "TaskResult",
     "artifact_name_from_location",
 ]

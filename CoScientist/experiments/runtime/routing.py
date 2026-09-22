@@ -34,30 +34,6 @@ def task_coverage_blob(state: Mapping[str, Any], task: ExperimentTask) -> str:
     return coverage_blob(task, _ops_index_from_state(state))
 
 
-def inventory_covers_task(state: Mapping[str, Any], task: ExperimentTask) -> bool:
-    """This-run retrieve covers the task: named, primary family, or bound tool."""
-    from CoScientist.experiments.capabilities.inventory import (
-        index_inventory_tools,
-        match_inventory_tool,
-        match_named_inventory_tool,
-    )
-
-    by_tool = index_inventory_tools(session_inventory_rows(state, scoped=False))
-    if not by_tool:
-        return False
-    blob = task_coverage_blob(state, task)
-    if match_named_inventory_tool(blob, by_tool) is not None:
-        return True
-    if match_inventory_tool(blob, by_tool) is not None:
-        return True
-    for server in task.mcp_servers:
-        for tool in server.tools:
-            name = str(getattr(tool, "name", "") or "").strip()
-            if name and name in by_tool:
-                return True
-    return False
-
-
 def mcp_routes_tried(task_runtime: Mapping[str, Any]) -> bool:
     attempts = task_runtime.get("attempts") or {}
     used = {

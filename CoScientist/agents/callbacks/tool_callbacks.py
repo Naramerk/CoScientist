@@ -334,13 +334,13 @@ def apply_tool_rerank_scores(
     ]
     # Some models emit 0-based indices while tool_index is 1-based (or vice versa).
     if not filtered_tools and rerank_map and acc_tools:
-        shifted = {
+        shifted = [
             tool for tool in acc_tools
             if rerank_map.get(_tool_rank_key(tool) - 1, 0) >= keep_score
             or rerank_map.get(_tool_rank_key(tool) + 1, 0) >= keep_score
-        }
+        ]
         if shifted:
-            filtered_tools = list(shifted)
+            filtered_tools = shifted
 
     best_score = max(rerank_map.values(), default=0.0)
     matched = bool(filtered_tools)

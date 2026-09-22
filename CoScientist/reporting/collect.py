@@ -163,9 +163,20 @@ def _table_to_markdown(path: Path) -> Optional[str]:
     """Render the first rows of a CSV/TSV as a markdown table, or None on failure.
 
     Uses the stdlib ``csv`` module so it never depends on pandas/tabulate being
-    installed in the host environment.
+    installed in the host environment. Excludes binary files and HTML documents.
     """
     import csv
+
+    if path.suffix.lower() not in _TABLE_EXTS:
+        return None
+
+    try:
+        with open(path, "rb") as bf:
+            head_bytes = bf.read(1024)
+        if b"\x00" in head_bytes:
+            return None
+    except Exception:
+        return None
 
     def clean(v: Any) -> str:
         return "" if v is None else str(v).replace("|", "\\|").replace("\n", " ")

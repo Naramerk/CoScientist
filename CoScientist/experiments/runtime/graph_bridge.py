@@ -28,6 +28,26 @@ logger = logging.getLogger(__name__)
 _SOURCE = "ExperimentModule"
 _VM_IDS_KEY = "experiment_graph_vm_ids"  # state-level: survives replans
 _RUNTIME_KEY = "experiment_runtime"
+
+
+def _cfg():
+    try:
+        from CoScientist.config import get_settings
+        return get_settings().experiments
+    except Exception:
+        return None
+
+
+def max_generated_data() -> int:
+    cfg = _cfg()
+    return getattr(cfg, "max_generated_data", 5) if cfg else 5
+
+
+def text_snippet_limit() -> int:
+    cfg = _cfg()
+    return getattr(cfg, "text_snippet_limit", 800) if cfg else 800
+
+
 _MAX_GENERATED_DATA = 5
 _TEXT_LIMIT = 800
 _HID_RE = re.compile(r"H\d+", re.IGNORECASE)
@@ -61,7 +81,9 @@ def _vm_ids(state: MutableMapping[str, Any]) -> dict[str, str]:
     return {str(k): str(v) for k, v in raw.items() if k and v}
 
 
-def _clean(value: Any, limit: int = _TEXT_LIMIT) -> str:
+def _clean(value: Any, limit: int | None = None) -> str:
+    if limit is None:
+        limit = text_snippet_limit()
     return re.sub(r"\s+", " ", str(value or "").strip())[:limit]
 
 
@@ -319,20 +341,30 @@ def publish_result_to_graph(
             source_ref = next(
                 (loc for a in artifacts if (loc := _artifact_location(a))), "",
             )
+            task = _task_by_id(state, task_id) or {}
+            design = task.get("design") or {}
+            dataset_name = (design.get("dataset") or {}).get("name") if isinstance(design.get("dataset"), dict) else ""
+            tools = [
+                t.get("name")
+                for s in (task.get("mcp_servers") or [])
+                for t in (s.get("tools") or [])
+                if isinstance(t, dict) and t.get("name")
+            ]
+            measured_on = dataset_name or (", ".join(tools) if tools else "") or source_ref or f"Task {task_id} execution"
             nodes.append({
                 "type": "Evidence",
                 "ref": "e0",
                 "attrs": {
                     "subtype": "computational",
                     "content": _clean(task_result.get("summary")) or f"Task {task_id}: {status}",
+                    "measured_on": measured_on,
                     "source_ref": source_ref,
                     "task_id": str(task_id),
                     "result_id": str(task_result.get("result_id") or ""),
                 },
             })
             edges.append({"type": "produces", "from": vm_id, "to": "#e0"})
-            task = _task_by_id(state, task_id)
-            for hid in _task_hypothesis_ids((task or {}).get("design") or {}):
+            for hid in _task_hypothesis_ids(design):
                 if graph_nodes.get(hid, {}).get("type") == "Hypothesis":
                     edges.append({"type": "relates_to", "from": "#e0", "to": hid})
             for i, artifact in enumerate(artifacts[:_MAX_GENERATED_DATA]):

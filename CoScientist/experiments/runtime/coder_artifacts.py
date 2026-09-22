@@ -88,6 +88,7 @@ def _copy_aliases(dest: Path, sandbox: Path, *, source_task: str, attempt_id: st
     """Also place the file where the executor historically quotes paths."""
     att = attempt_id or "latest"
     aliases = (
+        sandbox / name,
         sandbox / "experiment_artifacts" / source_task / att / name,
         sandbox / "workspace" / "experiment_artifacts" / source_task / att / name,
     )
@@ -185,6 +186,7 @@ def promote_coder_workspace_artifacts(
         if destination.resolve() != source.resolve():
             shutil.copy2(source, destination)
         payload = destination.read_bytes()
+        producer = str(runtime.get("last_route_agent") or "CoderAgent")
         record = {
             "name": name,
             "role": item.get("role") or "data",
@@ -192,7 +194,7 @@ def promote_coder_workspace_artifacts(
             "workspace_path": str(destination),
             "size_bytes": len(payload),
             "checksum_sha256": hashlib.sha256(payload).hexdigest(),
-            "producer_tool": "CoderAgent",
+            "producer_tool": producer,
             "source": "coder_workspace",
         }
         if record["workspace_path"] not in existing:

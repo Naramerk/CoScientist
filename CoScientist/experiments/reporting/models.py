@@ -17,14 +17,6 @@ from CoScientist.experiments.schemas.models import (
 )
 
 
-class ScientificCheck(StrictModel):
-    """Optional scientific claim status — separate from execution criteria_checks."""
-
-    hypothesis_ref: str = Field(min_length=1)
-    status: Literal["supported", "refuted", "inconclusive", "not_evaluated"]
-    details: str = Field(min_length=1)
-
-
 class ArtifactRef(StrictModel):
     artifact_id: str = Field(min_length=1)
     plan_id: str = Field(min_length=1)
@@ -110,7 +102,6 @@ class TaskResult(StrictModel):
     outputs: JsonObjectDict = Field(default_factory=dict)
     artifacts: list[ArtifactRef] = Field(default_factory=list)
     criteria_checks: list[CriterionCheck]
-    scientific_check: ScientificCheck | None = None
     error_code: str | None = None
     error_message: str | None = None
     retryable: bool = False

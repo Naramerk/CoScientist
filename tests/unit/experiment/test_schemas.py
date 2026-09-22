@@ -539,46 +539,6 @@ def test_experiment_task_does_not_default_missing_route_to_coder():
         )
 
 
-def test_scientific_check_is_optional_on_task_result():
-    from CoScientist.experiments.schemas import TaskResult
-
-    base = {
-        "schema_version": "task-result/0.1",
-        "result_id": "RES-1",
-        "plan_id": "PLAN-acceptance",
-        "task_id": "EXP-1",
-        "attempt_id": "ATT-1",
-        "attempt_no": 1,
-        "status": "success",
-        "planned_route": "coder",
-        "route_used": "coder",
-        "started_at": datetime(2026, 7, 31, 18, 0, tzinfo=timezone.utc),
-        "finished_at": datetime(2026, 7, 31, 18, 1, tzinfo=timezone.utc),
-        "summary": "ok",
-        "criteria_checks": [
-            {
-                "criterion_id": "EXP-1-C1",
-                "passed": True,
-                "details": "ok",
-            }
-        ],
-    }
-    plain = TaskResult.model_validate(base)
-    assert plain.scientific_check is None
-    with_check = TaskResult.model_validate(
-        {
-            **base,
-            "scientific_check": {
-                "hypothesis_ref": "H1",
-                "status": "inconclusive",
-                "details": "Need more samples.",
-            },
-        }
-    )
-    assert with_check.scientific_check is not None
-    assert with_check.scientific_check.status == "inconclusive"
-
-
 def test_mcp_server_ref_coerces_singular_tool_field():
     from CoScientist.experiments.schemas.models import MCPServerRef
 
@@ -747,4 +707,39 @@ def test_design_placeholders_are_dropped_not_invented():
     assert "primary_outcome" not in text
     assert "analysis.py" not in text
     assert "| EXP-1 |" in text and "—" in text
+
+
+def test_dataset_collector_route_validation():
+    from CoScientist.experiments.schemas import ExecutionRoute
+    assert ExecutionRoute.DATASET_COLLECTOR.value == "dataset_collector"
+
+    # Valid task with route=dataset_collector
+    valid_payload = {
+        **_task("EXP-1", route="dataset_collector"),
+        "mcp_servers": [],
+        "expected_artifacts": [
+            {"name": "dataset.csv", "role": "data", "required": True, "description": "ChEMBL targets"}
+        ],
+    }
+    task = ExperimentTask.model_validate(valid_payload)
+    assert task.route == ExecutionRoute.DATASET_COLLECTOR
+
+    # Invalid: mcp_servers present with dataset_collector
+    invalid_servers = {
+        **valid_payload,
+        "mcp_servers": [{"name": "s1", "server_id": "s1", "url": "http://localhost", "source": "registry", "tools": ["t1"]}],
+    }
+    with pytest.raises(ValidationError, match="must keep mcp_servers empty"):
+        ExperimentTask.model_validate(invalid_servers)
+
+    # Invalid: no required expected artifacts
+    invalid_artifacts = {
+        **valid_payload,
+        "expected_artifacts": [
+            {"name": "dataset.csv", "role": "data", "required": False, "description": "optional"}
+        ],
+    }
+    with pytest.raises(ValidationError, match="requires ≥1 required evidence artifact"):
+        ExperimentTask.model_validate(invalid_artifacts)
+
 

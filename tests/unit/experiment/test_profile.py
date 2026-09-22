@@ -59,20 +59,14 @@ def test_experiment_profile_is_isolated_and_preserves_a2a_contract():
     hyp = config.agent("HypothesesAgent")
     assert hyp.prompt == "hypotheses"
     assert hyp.model == "openai/gemini-3.7-flash"
-    assert hyp.tools == ["research_graph"]
-    assert "commit_experiment_hypotheses" in hyp.callbacks.after_agent
-    assert "seed_hypotheses_from_em_request" in hyp.callbacks.before_model
-    assert "enforce_hypothesis_research_commit" in hyp.callbacks.after_model
-    assert "normalize_em_hypothesis_commit" in hyp.callbacks.after_model
-    assert hyp.callbacks.after_model.index("enforce_hypothesis_research_commit") < (
-        hyp.callbacks.after_model.index("normalize_em_hypothesis_commit")
-    )
-    assert "capture_hypotheses_after_research_commit" in hyp.callbacks.after_tool
-    # Root must be bootstrapped before inject_research_context renders the
-    # {research_context?} placeholder, so a fresh graph never reads EMPTY.
-    assert hyp.callbacks.before_agent.index("bootstrap_research_question_if_empty") < (
-        hyp.callbacks.before_agent.index("inject_research_context")
-    )
+    assert hyp.tools == ["task_tracker", "graph", "research_graph"]
+    assert "inject_research_context" in hyp.callbacks.before_agent
+    assert "before_get_task" in hyp.callbacks.before_agent
+    assert "redact_link_urls" in hyp.callbacks.before_model
+    assert "expand_link_refs" in hyp.callbacks.after_model
+    assert "guard_unknown_tools" in hyp.callbacks.after_model
+    assert "resolve_link_refs" in hyp.callbacks.before_tool
+    assert "register_tool_result_links" in hyp.callbacks.after_tool
     preparer = config.agent("ToolPreparerAgent")
     assert "assess_experiment_inventory_feasibility" in preparer.callbacks.after_agent
     assert config.agent("ExperimentPlannerAgent").callbacks.before_agent[0] == (

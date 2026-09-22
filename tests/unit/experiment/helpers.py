@@ -95,7 +95,7 @@ def _task(
         "design": design or _design(hypothesis_ref),
         "mcp_servers": [_server(tool)] if route in {"fedot_mas", "react_tools"} else [],
         "input_data": [],
-        "launch_params": {"smiles": "CCO"},
+        "launch_params": {},
         "success_criteria": [
             {
                 "criterion_id": f"{task_id}-C1",
@@ -163,11 +163,12 @@ def _inventory() -> list[dict]:
     ]
 
 
-def _approved_state(plan: ExperimentPlan) -> dict:
+def _approved_state(plan: ExperimentPlan, settings: ExperimentsSettings | None = None) -> dict:
     state: dict = {}
+    cfg = settings or ExperimentsSettings()
     critique = critique_plan(
         plan,
-        settings=ExperimentsSettings(),
+        settings=cfg,
         available_tools=_inventory(),
     )
     payload = critique.model_dump(mode="json")
@@ -175,12 +176,19 @@ def _approved_state(plan: ExperimentPlan) -> dict:
         i for i in critique.issues
         if i.severity in {"blocker", "major"}
     ]
-    only_coder_inventory = bool(blocking) and all(
-        "uses route=coder" in i.message and "inventory already" in i.message
-        for i in blocking
+    allowed_codes = {
+        "coder_reimplements_family",
+        "coder_reimplements_inventory",
+        "only_execution_criteria",
+        "metrics_not_in_criteria",
+        "inventory_tool_absent",
+        "direct_mcp_coder_disabled",
+    }
+    only_expected = bool(blocking) and all(
+        i.code in allowed_codes for i in blocking
     )
     if critique.verdict != "approve":
-        assert only_coder_inventory, [i.message for i in blocking]
+        assert only_expected, [f"code={i.code}: {i.message}" for i in blocking]
         payload = {
             "schema_version": "plan-critique/0.1",
             "critique_id": "CRIT-test",

@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
-from typing import Any, Mapping, MutableMapping, Optional
+from typing import Any, Optional
 
 from google.adk.models import LlmResponse
 from google.adk.tools.base_tool import BaseTool
@@ -416,7 +416,7 @@ def on_route_agent_returned(
         runtime, _, attempt = active_attempt(tool_context.state)
         if tool_name != ROUTE_AGENT_BY_ROUTE.get(attempt["route"]) or attempt.get("route_returned"):
             return
-        if tool_name == "CoderAgent":
+        if tool_name in {"CoderAgent", "DatasetCollectorAgent"}:
             from CoScientist.experiments.runtime.coder_artifacts import promote_coder_workspace_artifacts
             promote_coder_workspace_artifacts(tool_context.state)
         stored = tool_response
@@ -634,11 +634,17 @@ def _next_control_action(runtime: dict[str, Any]) -> tuple[str, dict[str, Any]] 
     for tid, tr in _iter_task_runtimes(runtime):
         status = str(tr.get("status") or "")
         if status == "ready":
-            return "start_task", {"task_id": tid}
+            args: dict[str, Any] = {"task_id": tid}
+            if tr.get("current_route"):
+                args["route"] = tr["current_route"]
+            return "start_task", args
         if status == "retry_pending":
             return "retry_task", {"task_id": tid}
         if status == "fallback_pending":
-            return "fallback_task", {"task_id": tid}
+            return "fallback_task", {
+                "task_id": tid,
+                "reason": str(tr.get("fallback_reason") or "Execution failure — fallback required"),
+            }
     return None
 
 
@@ -658,6 +664,19 @@ def enforce_continue_until_reporting(
         return _force_call(name, args)
     if _pending_record_attempt(state) is not None or _llm_has_any_function_call(llm_response):
         return None
+
+    # Check if the model's text response is explaining a tool block / inability to proceed
+    text_content = ""
+    content = getattr(llm_response, "content", None)
+    for part in getattr(content, "parts", None) or []:
+        if getattr(part, "text", None):
+            text_content += part.text + " "
+
+    # Structured error conditions or explicit block statements in text
+    if any(phrase in text_content.lower() for phrase in ("repeat_call_guard", "unable to complete", "cannot proceed", "модерацию", "moderation")):
+        # Do not trap the model in a force-continue loop if it's reporting a block or failure
+        return None
+
     action = _next_control_action(runtime)
     if action is None:
         return None
@@ -730,11 +749,10 @@ def rewrite_mismatched_control_action(
         return _suppress("no_pending_transition")
 
     exp_name, exp_args = expected
-    # Allow skip_task on the same task that would otherwise start
+    # Allow skip_task or fallback_task on ANY task or on the pending task without forcing start_task
     for _, name, args in control_fcs:
-        if name == "skip_task" and exp_name == "start_task":
-            if str(args.get("task_id") or "") == str(exp_args.get("task_id") or ""):
-                return None
+        if name in ("skip_task", "fallback_task"):
+            return None
         if name == exp_name and str(args.get("task_id") or "") == str(exp_args.get("task_id") or ""):
             return None
 

@@ -63,7 +63,7 @@ Authoritative context (sole MCP inventory; ignore tool names from chat):
 If revision_feedback is non-empty, fix those issues first.
 
 CLOSED ENUMS (literals only):
-- route: fedot_mas|react_tools|coder|alembic_build|research|medical
+- route: fedot_mas|react_tools|coder|alembic_build|research|medical|dataset_collector
 - post_build_route (alembic_build only): fedot_mas|react_tools
 - mcp_servers[].source: registry|explicit|alembic
 - mcp_servers[].health: unknown|healthy|unhealthy
@@ -75,14 +75,24 @@ CLOSED ENUMS (literals only):
 - design.baselines[].kind: method|model|prior_result|external
 - design.metrics[].direction: maximize|minimize|compare
 - design.analysis_artifacts[].role: code|config|metrics_table|report
-- design.analysis_artifacts[].prepare_via: coder|mcp|existing|research|medical
-- launch_params: JSON object *string*, e.g. "{\"case\":\"alzheimer\",\"num\":10,\"upload_results_to_s3\":true}"
+- design.analysis_artifacts[].prepare_via: coder|mcp|existing|research|medical|dataset_collector
+- launch_params: JSON object *string*, e.g. "{}"
+  PARAMETER PROVENANCE — do not introduce entities, identifiers, structures, or
+  measurements that are not already in source_request or produced by an upstream artifact:
+  - A string value is allowed only when it is an enum/const literal on that property
+    in available_mcp_capabilities[].enums, or the same text appears verbatim in source_request.
+  - A number is allowed only when that number appears in source_request or it is the property's schema default.
+  - Booleans and null are allowed. Omit every other value.
+  - If the tool needs an input that is not in source_request and is not a schema literal or default,
+    leave it out of launch_params. Set depends_on and input_data kind=task_artifact so execution
+    binds the value from the upstream artifact.
 
 RULES:
 1. hypothesis_refs in context are AUTHORITATIVE (HypothesesAgent via commit bridge).
-   Copy EVERY id+statement into plan.hypotheses; cover EACH with ≥1 non-optional
-   task (design.hypothesis_ref or also_tests). Do NOT invent extra hypotheses.
-   If hypothesis_refs is empty, use one H1 restating source_request.
+   Copy EVERY id+statement into plan.hypotheses. Link hypotheses to tasks where a direct method exists.
+   If no method exists in available tools/operations to test a hypothesis, leave it unlinked — it will be
+   honestly postponed rather than faked with a proxy task. NEVER use also_tests as a fake proxy.
+   Do NOT invent extra hypotheses. If hypothesis_refs is empty, use one H1 restating source_request.
 2. Each task needs hypothesis_ref, experiment_question, dataset, baselines≥1,
    metrics≥1, analysis_artifacts≥1. dataset.ref usually null; URLs in notes.
    Never invent example.com/org/net, localhost, s3://artifacts, or dummy files.
@@ -93,10 +103,12 @@ RULES:
    route → record_result cycle, and measured 2026-09-04 the larger plans
    finished slower with more partial results, not with more evidence.
    experiment_context.operations is AUTHORITATIVE when non-empty: cover EVERY
-   operation_id with ≥1 non-optional task. Multi-step pipelines (generation →
-   docking → analysis) use separate tasks that share design.operation_ref=OP-n.
+   operation_id with ≥1 non-optional task. Multi-step pipelines can be a single COMPOSITE task
+   or separate tasks that share design.operation_ref=OP-n.
    Set design.experiment_question to that step. Multi-part asks without operations:
-   one non-optional task per distinct target.
+   one non-optional task per distinct target/objective (e.g. for a request asking for N targets, create N focused tasks).
+   A single task may be COMPOSITE: binding multiple MCP tools, with per-tool launch_params
+   and a separate expected_artifact for each bound tool.
 4. Plan only source_request operations. Inventory ≠ checklist. NEVER add a narrative task
    (report/synthesis/выводы) — ResultAggregator owns that.
    No literature/PDB task unless source_request asks (route 2).
@@ -106,7 +118,7 @@ RULES:
    risks/assumptions only at plan root; methods = JSON array of strings.
    Copy experiment_context.constraints into assumptions/risks when they constrain methods.
    On critique revise: uncovered OP-n → add required task(s). Uncovered hypothesis_refs
-   → hang on an existing required task (also_tests). Multiple tasks may share operation_ref.
+   without a method are marked postponed. Multiple tasks may share operation_ref.
 5. Route (exact coverage & data compatibility; same-domain similarity ≠ coverage). Leftover MCP for a different operation is not coverage.
    1) SAME-operation on-demand MCP (dynamic compute on input structures, e.g. generate_mols, calculate_docking) → fedot_mas (react_tools if FEDOT off). Bind exact inventory server_id+tool. Copy url from available_mcp_servers. Do not swap a different-family tool.
       - If evaluating new candidate molecules across multiple targets/isoforms (selectivity/comparative profiling) or generating comparative plots where no single MCP handles multi-target scoring → route=coder.
@@ -116,14 +128,17 @@ RULES:
    3) SAME-operation PubMed/PICO/DICOM AND source_request asks → medical, mcp_servers=[].
    4) route_alembic=true AND a repo_candidates[].url fits → alembic_build, repo_url=<exact
       url>, post_build_route=fedot_mas, mcp_servers=[]. PREFERRED over coder when a repo fits.
-   5) else required route=coder (for multi-target scripting, comparative data tables, plots, or uncovered operations).
-   Mixed ask = one plan: research/medical evidence, fedot_mas compute, coder uncovered/comparative.
+   5) route=dataset_collector: mcp_servers=[], launch_params="{}", prepare_via=dataset_collector, expected_artifacts role=data (e.g. "dataset.csv"). Use when raw data or known target actives must be gathered/assembled from external sources (ChEMBL, PubChem) before modeling.
+   6) else required route=coder (for multi-target scripting, comparative data tables, plots, or uncovered operations).
+   Mixed ask = one plan: research/medical evidence, dataset_collector baselines, fedot_mas compute, coder uncovered/comparative.
 6. Copy experiment_run_id + source_request verbatim. plan_id: one stable
    non-empty id, e.g. PLAN-<uuid>; revision: integer >= 1. On a REVISION round
    the runtime overwrites both from the previous plan, so never try to recall
    the previous plan_id - but a first plan is used as written.
-   success_criteria = execution verification, not claim status.
-   expected_artifacts: bound MCP → what that tool produces (role=data). Mandatory markdown/HTML reports are forbidden
+   success_criteria: for each non-optional compute task, require AT LEAST ONE criterion with kind='threshold'
+   specifying metric (matching design.metrics[].name), operator, and numeric target; artifact_exists is only
+   allowed as an auxiliary criterion. A compute task without a threshold criterion will be rejected.
+   expected_artifacts: bound MCP → what that tool produces (role=data). For composite tasks, include an expected artifact for EACH bound tool. Mandatory markdown/HTML reports are forbidden
    for data/generator tools (required=false only).
    coder → concrete filenames; alembic_build → mcp_server/report.
 
@@ -132,18 +147,19 @@ Minimal fedot_mas (copy server_id, name, url from available_mcp_servers):
  "design":{"hypothesis_ref":"H1","operation_ref":"OP-1","experiment_question":"…",
   "dataset":{"name":"…","ref":null,"notes":"…"},
   "baselines":[{"name":"…","kind":"method","ref":null}],
-  "metrics":[{"name":"…","direction":"maximize","threshold":0.8,"test":null}],
+  "metrics":[{"name":"docking_score","direction":"minimize","threshold":-7.0,"test":null}],
   "analysis_artifacts":[{"name":"out.json","role":"data","prepare_via":"mcp","path_or_tool":"generate_mols"}]},
  "mcp_servers":[{"name":"srv-chem","server_id":"srv-chem","url":"http://127.0.0.1:8000/mcp","tools":["generate_mols"],"source":"registry","health":"unknown"}],
  "repo_url":null,"post_build_route":null,"input_data":[],
- "launch_params":"{\"case\":\"target\",\"num\":10,\"upload_results_to_s3\":true}",
- "success_criteria":[{"criterion_id":"C1","description":"out.json exists","kind":"artifact_exists","metric":null,"operator":null,"target":null,"required":true,"verification":"Confirm out.json"}],
+ "launch_params":"{}",
+ "success_criteria":[{"criterion_id":"C1","description":"out.json exists","kind":"artifact_exists","metric":null,"operator":null,"target":null,"required":true,"verification":"Confirm out.json"},{"criterion_id":"C2","description":"score threshold met","kind":"threshold","metric":"docking_score","operator":"<=","target":-7.0,"required":true,"verification":"Measured from out.csv"}],
  "expected_artifacts":[{"name":"out.json","role":"data","media_type":"application/json","required":true,"description":"…"}],
  "est_duration_min":30,"warnings":[],"depends_on":[],"optional":false}
 
 Deltas vs that skeleton (same design/criteria/artifact shape):
 - coder: route=coder, mcp_servers=[], launch_params="{}", prepare_via=coder, path_or_tool=filename
 - research: route=research, mcp_servers=[], prepare_via=research, path_or_tool=family tool, artifact role=report
+- dataset_collector: route=dataset_collector, mcp_servers=[], launch_params="{}", prepare_via=dataset_collector, path_or_tool="dataset_collector", expected_artifacts role=data
 - alembic_build: route=alembic_build, mcp_servers=[], repo_url from repo_candidates, post_build_route=fedot_mas,
   expected_artifacts role=mcp_server. Runtime injects the built server — never invent tools.
 
@@ -170,6 +186,9 @@ Routes: <<AGENTS>>
    task_id/attempt_id. Keys: status,summary,outputs,criteria_checks[{criterion_id,
    passed,observed,evidence_artifact_ids,details}],error_code,error_message,
    retryable,warnings.
+   criteria_checks[].evidence_artifact_ids is REQUIRED for each check and must reference
+   the exact returned artifact id. NEVER write placeholder strings (e.g. '[Insert SMILES here]',
+   'TBD', '<paste here>') into outputs; placeholder outputs are rejected.
    Real outputs/artifacts/download URLs or literature notes → status=success or
    partial (gaps in warnings). Do NOT record failure for materialization warnings
    or "insufficient literature". Simulated/hardcoded outputs are forbidden.
@@ -226,6 +245,9 @@ def experiment_coder_route(ctx: PromptContext) -> str:
 Envelope: {experiment_active_envelope?}
 <<TOOLS>>
 No invented data/SMILES/LD50/citations/clinical findings.
+When task binds MCP tools (route_coder_mcp): call attached MCP tools directly for compute,
+and use code only for data preparation, postprocessing, or multi-target comparison.
+Do not reinvent what the MCP tool computes.
 ANTI-FABRICATION: never replace the method with a hardcoded/synthetic/
 simulated/placeholder/mock proxy and claim success. Missing inputs → honest
 failure/partial. Write EXACT expected_artifact basenames (short relative paths).
@@ -253,25 +275,16 @@ redesign note. Markdown.
 @_register("experiment_result_aggregator")
 def experiment_result_aggregator(ctx: PromptContext) -> str:
     return render_template(
-        """You are ResultAggregatorAgent — the terminal stage of the scientific pipeline.
-Run summary: {experiment_summary?}
+        """Terminal Experiment Module report.
+Summary: {experiment_summary?}
 TaskResults: {experiment_task_results?}
-Artifacts manifest: {experiment_artifacts_manifest?}
-Research context: {research_context?}
-
+Canonical artifact locations (paste verbatim only): {experiment_artifacts_manifest?}
 <<TOOLS>>
-
-### MANDATORY PROCEDURE:
-1. ALWAYS call `format_results` first. It copies all figures (PNG) and data tables (CSV/HTML) generated during the run into the report directory and returns ready-to-embed Markdown snippets.
-2. If the research graph is active, you may call `research_overview()` to inspect conclusions and evidence.
-3. Synthesize a comprehensive, self-contained Markdown report:
-   - **Executive Summary / Objective**: The core scientific question and summary of outcomes.
-   - **Computational Experiments & Methods**: Detailed breakdown of each executed task (EXP-1, EXP-2, etc.), tools used, and key findings.
-   - **Results, Tables & Figures**: Embed ALL collected figures (`![Figure](figures/<name>.png)`) and tables verbatim as returned by `format_results`.
-   - **Discussion & Selectivity Analysis**: Scientific interpretation of the results, binding affinities, selectivity ratios, and trade-offs.
-   - **Limitations & Next Steps**: Caveats, failed or partial tasks, and concrete recommendations for follow-up studies.
-
-Ground every claim in actual experiment data. Never invent URLs or numbers. Embed every available figure and table.
+format_results once, then one grounded Markdown report. Preserve statuses,
+criteria, artifact locations from the manifest; note paused/redesign.
+Never invent URLs/S3 paths. Never upgrade fail→success or issue a scientific
+hypothesis verdict. Include detailed tables, per-task metrics, criteria checks,
+and embedded figures from format_results verbatim.
 """,
         TOOLS=ctx.render_tools(),
     )

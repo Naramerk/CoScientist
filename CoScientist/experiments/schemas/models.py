@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import re
-from contextvars import ContextVar, Token
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Annotated, Any, Literal
@@ -17,10 +16,6 @@ from pydantic import (
     model_validator,
 )
 from pydantic.json_schema import WithJsonSchema
-
-# Kept for callers / env (EXPERIMENTS__LENIENT_PLANNER). Design lists are no
-# longer invented: empty stays empty; unspecified* names are dropped.
-_LENIENT_PLANNER: ContextVar[bool] = ContextVar("experiment_lenient_planner", default=True)
 
 _DESIGN_PLACEHOLDERS = frozenset({
     "comparative reference method",
@@ -36,18 +31,6 @@ _DESIGN_PLACEHOLDERS = frozenset({
 def is_design_placeholder(value: Any) -> bool:
     text = str(value or "").strip().lower()
     return (not text) or text.startswith("unspecified") or text in _DESIGN_PLACEHOLDERS
-
-
-def set_lenient_planner(enabled: bool) -> Token:
-    return _LENIENT_PLANNER.set(bool(enabled))
-
-
-def reset_lenient_planner(token: Token) -> None:
-    _LENIENT_PLANNER.reset(token)
-
-
-def lenient_planner_enabled() -> bool:
-    return _LENIENT_PLANNER.get()
 
 _SIGNED_QUERY_MARKERS = (
     "x-amz-algorithm",
@@ -147,6 +130,7 @@ class ExecutionRoute(str, Enum):
     ALEMBIC_BUILD = "alembic_build"
     RESEARCH = "research"
     MEDICAL = "medical"
+    DATASET_COLLECTOR = "dataset_collector"
 
 
 class MCPToolRef(StrictModel):
@@ -697,6 +681,9 @@ def _coerce_prepare_via(value: Any) -> str:
         "literature": "research",
         "pubmed": "medical",
         "clinical": "medical",
+        "dataset_collector": "dataset_collector",
+        "dataset": "dataset_collector",
+        "chembl": "dataset_collector",
     }
     return aliases.get(text, text or "coder")
 
@@ -708,7 +695,7 @@ class DesignAnalysisArtifact(StrictModel):
         BeforeValidator(_coerce_analysis_role),
     ]
     prepare_via: Annotated[
-        Literal["coder", "mcp", "existing", "research", "medical"],
+        Literal["coder", "mcp", "existing", "research", "medical", "dataset_collector"],
         BeforeValidator(_coerce_prepare_via),
     ] = "coder"
     path_or_tool: str | None = None
@@ -1003,7 +990,7 @@ class ExperimentTask(StrictModel):
         if self.route in {ExecutionRoute.REACT_TOOLS, ExecutionRoute.FEDOT_MAS}:
             if not any(tool for server in self.mcp_servers for tool in server.tools):
                 raise ValueError(f"route={self.route.value} requires an MCP server/tool")
-        if self.route in {ExecutionRoute.RESEARCH, ExecutionRoute.MEDICAL}:
+        if self.route in {ExecutionRoute.RESEARCH, ExecutionRoute.MEDICAL, ExecutionRoute.DATASET_COLLECTOR}:
             if self.mcp_servers:
                 raise ValueError(
                     f"route={self.route.value} must keep mcp_servers empty "
@@ -1197,6 +1184,7 @@ BLOCKING_SEVERITIES = frozenset({"blocker", "major"})
 
 class CritiqueIssue(StrictModel):
     issue_id: str = Field(min_length=1)
+    code: str = ""
     category: Literal[
         "relevance", "completeness", "consistency", "feasibility", "complexity", "security", "schema"
     ]
@@ -1238,7 +1226,6 @@ class PlanCritique(StrictModel):
 _REPORTING_EXPORTS = frozenset({
     "ArtifactRef",
     "CriterionCheck",
-    "ScientificCheck",
     "TaskResult",
     "artifact_name_from_location",
 })
@@ -1270,15 +1257,11 @@ __all__ = [
     "MCPServerRef",
     "MCPToolRef",
     "PlanCritique",
-    "ScientificCheck",
     "SuccessCriterion",
     "TaskDesign",
     "TaskResult",
     "artifact_name_from_location",
     "is_design_placeholder",
     "is_presigned_url",
-    "lenient_planner_enabled",
-    "reset_lenient_planner",
-    "set_lenient_planner",
     "utc_now",
 ]

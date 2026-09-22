@@ -5,7 +5,7 @@ import copy
 import html
 import mimetypes
 from pathlib import Path
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Mapping, MutableMapping, Sequence
 from uuid import uuid4
 
 from CoScientist.config import get_settings
@@ -27,6 +27,7 @@ _REPORT_EVIDENCE_ROLES = frozenset({"data", "report", "log"})
 EVIDENCE_AGENT_ROUTES = frozenset({
     ExecutionRoute.RESEARCH.value,
     ExecutionRoute.MEDICAL.value,
+    ExecutionRoute.DATASET_COLLECTOR.value,
 })
 _ATTESTABLE_CRITERION_KINDS = frozenset({"execution", "artifact_exists", "schema"})
 _UNKNOWN_TOOL_SNIPPET = "do not exist — they are not in your tool list"
@@ -349,10 +350,46 @@ def append_notes_artifact(
         raw_artifacts.append(written)
 
 
+def _find_matching_artifact(
+    crit: Any,
+    task: ExperimentTask,
+    artifacts: Sequence[ArtifactRef] | None,
+) -> ArtifactRef | None:
+    if not artifacts:
+        return None
+    target = str(getattr(crit, "target", "") or "").strip().lower()
+    desc = str(getattr(crit, "description", "") or "").lower()
+    for a in artifacts:
+        if not a.artifact_id:
+            continue
+        aname = a.name.lower()
+        if target and (aname == target or aname.endswith(target)):
+            return a
+        if aname in desc:
+            return a
+    for exp in task.expected_artifacts:
+        ename = str(exp.name or "").strip().lower()
+        if ename and (ename in desc or (target and ename == target)):
+            for a in artifacts:
+                if a.name.lower() == ename or artifact_name_key(a.name) == artifact_name_key(ename):
+                    return a
+    kind = str(getattr(crit, "kind", "") or "")
+    if kind == "artifact_exists":
+        for a in artifacts:
+            if target and (target in a.name.lower() or a.name.lower() in target):
+                return a
+    return None
+
+
 def attest_durable_criteria(
-    task: ExperimentTask, checks: list[CriterionCheck],
+    task: ExperimentTask,
+    checks: list[CriterionCheck],
+    artifacts: Sequence[ArtifactRef] | None = None,
 ) -> list[CriterionCheck]:
-    """Pass execution/artifact/schema criteria when durable family evidence exists."""
+    """Pass execution/artifact/schema criteria only when matching concrete artifact exists.
+
+    Threshold criteria are NEVER attested.
+    """
     by_id = {check.criterion_id: check for check in checks}
     out: list[CriterionCheck] = []
     seen: set[str] = set()
@@ -360,18 +397,30 @@ def attest_durable_criteria(
         cid = crit.criterion_id
         existing = by_id.get(cid)
         kind = str(crit.kind or "execution")
-        if kind in _ATTESTABLE_CRITERION_KINDS:
-            out.append(CriterionCheck.model_validate({
-                "criterion_id": cid,
-                "passed": True,
-                "observed": existing.observed if existing is not None else True,
-                "details": (
-                    (existing.details if existing is not None else "")
-                    or "attested via durable family evidence"
-                ),
-            }))
-            seen.add(cid)
+        if kind == "threshold":
+            if existing is not None:
+                out.append(existing)
+                seen.add(cid)
             continue
+        if kind in _ATTESTABLE_CRITERION_KINDS:
+            hit = _find_matching_artifact(crit, task, artifacts) if artifacts else None
+            if hit is not None and hit.artifact_id:
+                evidence_ids = list(existing.evidence_artifact_ids) if existing and existing.evidence_artifact_ids else [hit.artifact_id]
+                out.append(CriterionCheck.model_validate({
+                    "criterion_id": cid,
+                    "passed": True,
+                    "observed": existing.observed if existing is not None and existing.observed is not None else True,
+                    "evidence_artifact_ids": evidence_ids,
+                    "details": (
+                        (existing.details if existing is not None else "")
+                        or f"attested via artifact {hit.name}"
+                    ),
+                }))
+                seen.add(cid)
+                continue
+            elif artifacts is None and not getattr(task, "optional", False):
+                # When artifacts collection is not provided, only carry existing checks; do not invent attestations
+                pass
         if existing is not None:
             out.append(existing)
             seen.add(cid)
@@ -382,9 +431,12 @@ def attest_durable_criteria(
 
 
 def runtime_has_durable_data_evidence(runtime: Mapping[str, Any], task_id: str) -> bool:
-    """Prior TaskResults already hold S3/file evidence (not alembic mcp_url)."""
+    """Prior successful/partial TaskResults already hold real S3/file evidence."""
     for result in runtime.get("results") or []:
         if not isinstance(result, dict) or result.get("task_id") != task_id:
+            continue
+        # Only successful or partial results can count as durable evidence
+        if result.get("status") not in {"success", "partial"}:
             continue
         for raw in result.get("artifacts") or []:
             if not isinstance(raw, dict):
@@ -447,6 +499,7 @@ def criteria_valid(
     checks: list[CriterionCheck],
     *,
     route: str | None = None,
+    evidence_strict: bool = False,
 ) -> tuple[bool, list[str]]:
     by_id = {check.criterion_id: check for check in checks}
     if unknown := set(by_id) - {c.criterion_id for c in task.success_criteria}:
@@ -461,4 +514,15 @@ def criteria_valid(
         for c in required
         if c.criterion_id not in by_id or by_id[c.criterion_id].passed is not True
     ]
+    if not failed and evidence_strict and route in {"fedot_mas", "react_tools", "coder"}:
+        unevidenced = [
+            c.criterion_id
+            for c in required
+            if c.criterion_id in by_id and not by_id[c.criterion_id].evidence_artifact_ids
+        ]
+        if unevidenced:
+            raise ExperimentRuntimeError(
+                "criterion_unevidenced",
+                f"Required criteria lack evidence artifacts on compute route {route}: {unevidenced}.",
+            )
     return not failed, failed

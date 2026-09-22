@@ -1250,13 +1250,7 @@ _EM = "CoScientist.experiments"
 _EM_CALLBACKS: tuple[tuple[str, str, str], ...] = (
     # Bounded planner context plus hard AgentTool route guard.
     ("build_experiment_context", "before_agent", f"{_EM}.context:build_experiment_context"),
-    ("commit_experiment_hypotheses", "after_agent", f"{_EM}.hypotheses:commit_experiment_hypotheses"),
-    ("persist_experiment_em_request", "before_agent", f"{_EM}.hypotheses:persist_experiment_em_request"),
-    ("bootstrap_research_question_if_empty", "before_agent", f"{_EM}.hypotheses:bootstrap_research_question_if_empty"),
-    ("seed_hypotheses_from_em_request", "before_model", f"{_EM}.hypotheses:seed_hypotheses_from_em_request"),
-    ("enforce_hypothesis_research_commit", "after_model", f"{_EM}.hypotheses:enforce_hypothesis_research_commit"),
-    ("normalize_em_hypothesis_commit", "after_model", f"{_EM}.hypotheses:normalize_em_hypothesis_commit"),
-    ("capture_hypotheses_after_research_commit", "after_tool", f"{_EM}.hypotheses:capture_hypotheses_after_research_commit"),
+    ("persist_experiment_em_request", "before_agent", f"{_EM}.context:persist_experiment_em_request"),
     ("reset_experiment_retrieval_budget", "before_agent", f"{_EM}.context:reset_experiment_retrieval_budget"),
     ("enforce_experiment_retrieval_budget", "after_model", f"{_EM}.context:enforce_experiment_retrieval_budget"),
     ("snapshot_experiment_discovered_capabilities", "after_agent", f"{_EM}.context:snapshot_experiment_discovered_capabilities"),
