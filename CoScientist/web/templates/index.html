@@ -166,7 +166,7 @@
       <!-- Activity Rail: Executive Fleet & Tool Execution HUD -->
       <div id="activity-rail"
         class="hidden w-full max-w-full min-w-0 border-b border-outline-variant/15 bg-gradient-to-b from-[#11141b]/95 via-[#0d1016]/95 to-[#0b0d13]/95 backdrop-blur-xl px-4 py-2.5 space-y-2 shadow-[inset_0_1px_0_0_rgba(0,218,243,0.12),0_8px_24px_-4px_rgba(0,0,0,0.5)]">
-        
+
         <!-- Row 1: Agent Fleet -->
         <div class="flex items-center gap-2.5 w-full min-w-0">
           <div class="flex items-center gap-1.5 shrink-0 px-2 py-1 rounded-md bg-[#161a23] border border-outline-variant/15 shadow-sm">
@@ -174,7 +174,7 @@
             <span data-i18n="rail.agents" class="text-[9px] font-bold font-mono tracking-widest uppercase text-on-surface-variant">Agents</span>
             <span id="activity-agents-count" class="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded bg-primary/15 text-primary border border-primary/25">0</span>
           </div>
-          
+
           <div class="relative flex-1 min-w-0 flex items-center group/rail">
             <button type="button" id="rail-agents-left" onclick="scrollActivityRail('activity-agents', -240)"
               class="hidden absolute left-0 z-10 w-6 h-6 rounded-full bg-surface-container-high/95 border border-outline-variant/25 text-on-surface shadow-lg hover:text-primary hover:border-primary/50 transition-all items-center justify-center -ml-1 cursor-pointer">
@@ -355,6 +355,20 @@
         </div>
         <div id="metrics-agents" class="space-y-1 font-mono text-[9px] max-h-64 overflow-y-auto no-scrollbar"></div>
         <div id="metrics-note" class="hidden text-[8px] font-mono text-error/70 mt-2 leading-relaxed"></div>
+      </div>
+
+      <!-- Checkpoints -->
+      <div class="bg-surface-container-lowest p-4 rounded-xl border border-outline-variant/10 overflow-hidden relative">
+        <div class="absolute top-3 right-3">
+          <button onclick="refreshCheckpoints()" title="Refresh"
+            class="text-[#424656] hover:text-primary transition-colors">
+            <span class="material-symbols-outlined text-sm">refresh</span>
+          </button>
+        </div>
+        <h4 class="text-[10px] font-bold text-outline-variant uppercase mb-3 tracking-widest">Checkpoints</h4>
+        <div id="checkpoint-list" class="space-y-2 max-h-96 overflow-y-auto no-scrollbar">
+          <div class="text-outline-variant text-[9px] font-mono">No snapshots yet</div>
+        </div>
       </div>
 
       <!-- HITL Pending -->
@@ -819,6 +833,7 @@
   <script src="/static/js/modals/dataset.js"></script>
   <script src="/static/js/modals/roadmap.js"></script>
   <script src="/static/js/plan_tracker.js"></script>
+  <script src="/static/js/checkpoints.js"></script>
   <script src="/static/js/modals/experiments.js"></script>
   <script src="/static/js/ws.js"></script>
   <script src="/static/js/app.js"></script>
