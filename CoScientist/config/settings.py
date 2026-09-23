@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Optional, Union
 
 from dotenv import find_dotenv as _find_dotenv, load_dotenv as _load_dotenv
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _load_dotenv(_find_dotenv())
@@ -367,6 +367,35 @@ class ResearchGraphSettings(BaseModel):
 
 
 # =========================
+# CHECKPOINTS
+# =========================
+class CheckpointSettings(BaseModel):
+    """Run-state snapshots at module boundaries (checkpoints/ package).
+
+    OFF by default: enabling adds the CheckpointPlugin to every runner and a
+    /api/checkpoints router to the A2A/web apps. Override via
+    CHECKPOINTS__ENABLED / CHECKPOINTS__DIR. Management API additionally requires
+    CHECKPOINTS__API_TOKEN; capture itself remains available without a token.
+    """
+
+    enabled: bool = False
+    dir: str = "./checkpoints_data"
+    api_token: Optional[SecretStr] = Field(default=None, min_length=32)
+
+
+# =========================
+# SYNAPSE v1 ADAPTER
+# =========================
+class SynapseSettings(BaseModel):
+    """Synapse platform v1 contract bridge (checkpoints/synapse.py)."""
+
+    enabled: bool = False
+    callback_url: Optional[str] = None
+    bundle_base_url: Optional[str] = None
+    otlp_endpoint: Optional[str] = None
+
+
+# =========================
 # CRITIC
 # =========================
 class CriticSettings(BaseModel):
@@ -410,6 +439,8 @@ class Settings(BaseSettings):
     mcp: MCPSettings = MCPSettings()
     web: WebSettings = WebSettings()
     research_graph: ResearchGraphSettings = ResearchGraphSettings()
+    checkpoints: CheckpointSettings = CheckpointSettings()
+    synapse: SynapseSettings = SynapseSettings()
     critic: CriticSettings = CriticSettings()
 
     model_config = SettingsConfigDict(
